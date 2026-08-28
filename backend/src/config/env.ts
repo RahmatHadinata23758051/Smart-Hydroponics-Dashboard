@@ -13,8 +13,8 @@ const envSchema = z.object({
   // MQTT Settings
   MQTT_HOST: z.string().default('sdp.polinela.ac.id'),
   MQTT_PORT: z.string().default('1883').transform(Number),
-  MQTT_USERNAME: z.string().default('REDACTED_MQTT_USERNAME'),
-  MQTT_PASSWORD: z.string().default('REDACTED_MQTT_PASSWORD'),
+  MQTT_USERNAME: z.string().default(''),
+  MQTT_PASSWORD: z.string().default(''),
   MQTT_CLIENT_ID: z.string().default(`hydro-backend-${Math.random().toString(16).substring(2, 8)}`),
   MQTT_BASE_TOPIC: z.string().default('hidroponik/lab'),
   MQTT_RELAY_TOPIC: z.string().default('hidroponik/lab/relay'),
