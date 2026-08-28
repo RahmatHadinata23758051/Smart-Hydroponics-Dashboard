@@ -108,10 +108,9 @@ Relay beroperasi dengan logika Active HIGH pada GPIO controller ESP32-S3:
 ## 4. Spesifikasi Protokol & Payload Data MQTT
 
 ### 4.1 Parameter Koneksi Broker
-- Host: `sdp.polinela.ac.id`
-- Port: `1883`
-- Username: `septa`
-- Password: `123321`
+- Host: Disetel melalui variabel lingkungan (`MQTT_HOST`)
+- Port: `1883` (Standard TCP) / Disetel via `MQTT_PORT`
+- Autentikasi: Menggunakan username & password yang dikonfigurasi pada `.env` (`MQTT_USERNAME`, `MQTT_PASSWORD`)
 - Base Topic: `hidroponik/lab`
 - Relay Topic: `hidroponik/lab/relay`
 
