@@ -16,8 +16,8 @@ const envSchema = z.object({
   MQTT_USERNAME: z.string().default('REDACTED_MQTT_USERNAME'),
   MQTT_PASSWORD: z.string().default('REDACTED_MQTT_PASSWORD'),
   MQTT_CLIENT_ID: z.string().default(`hydro-backend-${Math.random().toString(16).substring(2, 8)}`),
-  MQTT_BASE_TOPIC: z.string().default('polinela/lab'),
-  MQTT_RELAY_TOPIC: z.string().default('polinela/lab/relay'),
+  MQTT_BASE_TOPIC: z.string().default('hidroponik/lab'),
+  MQTT_RELAY_TOPIC: z.string().default('hidroponik/lab/relay'),
 
   // InfluxDB Settings
   INFLUX_URL: z.string().default('http://localhost:8086'),
