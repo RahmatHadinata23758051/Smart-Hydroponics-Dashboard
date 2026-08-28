@@ -46,7 +46,7 @@ class MqttService {
       this.isConnected = true;
       logger.info('✅ MQTT Broker connected successfully!');
 
-      // Subscribe ke seluruh topik polinela/lab/# dan relay/#
+      // Subscribe ke seluruh topik hidroponik/lab/# dan relay/#
       const topics = [
         `${env.MQTT_BASE_TOPIC}/#`,
         `${env.MQTT_RELAY_TOPIC}/#`,
