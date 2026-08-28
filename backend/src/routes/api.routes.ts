@@ -21,8 +21,8 @@ router.get('/telemetry/export', telemetryController.exportCsv);
 
 // --- Actuator & Relay Endpoints
 router.get('/relays/state', actuatorController.getRelayStates);
-router.post('/relays/:channel/command', actuatorController.triggerRelay);
 router.post('/relays/all/command', actuatorController.triggerAllRelays);
+router.post('/relays/:channel/command', actuatorController.triggerRelay);
 router.post('/system/command', actuatorController.triggerSystemCommand);
 
 // --- Diagnostics & Logs Endpoints
