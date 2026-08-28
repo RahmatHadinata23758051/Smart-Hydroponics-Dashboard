@@ -46,20 +46,15 @@ class MqttService {
       this.isConnected = true;
       logger.info('✅ MQTT Broker connected successfully!');
 
-      // Subscribe ke topik telemetri, status, alarm, dan relay
+      // Subscribe ke seluruh topik polinela/lab/# dan relay/#
       const topics = [
-        `${env.MQTT_BASE_TOPIC}/telemetry`,
-        `${env.MQTT_BASE_TOPIC}/status`,
-        `${env.MQTT_BASE_TOPIC}/alarm`,
-        `${env.MQTT_BASE_TOPIC}/event`,
-        `${env.MQTT_RELAY_TOPIC}/state`,
-        `${env.MQTT_RELAY_TOPIC}/status`,
-        `${env.MQTT_RELAY_TOPIC}/+/state`,
+        `${env.MQTT_BASE_TOPIC}/#`,
+        `${env.MQTT_RELAY_TOPIC}/#`,
       ];
 
       this.client?.subscribe(topics, (err) => {
         if (err) logger.error('Failed to subscribe to MQTT topics:', err);
-        else logger.info('📡 Subscribed to MQTT topics:', { topics });
+        else logger.info('📡 Subscribed to live topics:', { topics });
       });
     });
 
@@ -81,15 +76,40 @@ class MqttService {
     });
   }
 
+  private ensureLatestTelemetry(): TelemetryPayload {
+    if (!this.latestTelemetry) {
+      this.latestTelemetry = {
+        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        ip: this.latestDeviceStatus?.ip || '0.0.0.0',
+        air_t: null,
+        air_rh: null,
+        lux: null,
+        ec: null,
+        tds: null,
+        ph: null,
+        water_t: null,
+        dist_mm: null,
+        level_pct: null,
+        relay: [
+          this.latestRelayState.relay1 === 'ON' ? 1 : 0,
+          this.latestRelayState.relay2 === 'ON' ? 1 : 0,
+          this.latestRelayState.relay3 === 'ON' ? 1 : 0,
+          this.latestRelayState.relay4 === 'ON' ? 1 : 0,
+        ],
+      };
+    }
+    return this.latestTelemetry;
+  }
+
   private handleIncomingMessage(topic: string, msgStr: string) {
     logger.debug(`[MQTT RX] Topic: ${topic} | Msg: ${msgStr}`);
 
     try {
+      // 1. Telemetri Agregat Utama
       if (topic === `${env.MQTT_BASE_TOPIC}/telemetry`) {
         const data: TelemetryPayload = JSON.parse(msgStr);
         this.latestTelemetry = data;
 
-        // Update relay cache from telemetry
         if (Array.isArray(data.relay) && data.relay.length === 4) {
           this.latestRelayState = {
             relay1: data.relay[0] ? 'ON' : 'OFF',
@@ -99,11 +119,53 @@ class MqttService {
           };
         }
 
-        // Asynchronous storage
         influxService.writeTelemetry(data);
         this.notifySubscribers('telemetry', data);
       }
 
+      // 2. Parser Tambahan untuk Topik Sensor Individual (sensor1 - sensor6)
+      else if (topic === `${env.MQTT_BASE_TOPIC}/sensor1` || topic === `${env.MQTT_BASE_TOPIC}/sensor2`) {
+        const data = JSON.parse(msgStr);
+        const tele = this.ensureLatestTelemetry();
+        if (data.temp !== undefined) tele.air_t = data.temp;
+        if (data.hum !== undefined) tele.air_rh = data.hum;
+        tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        influxService.writeTelemetry(tele);
+        this.notifySubscribers('telemetry', tele);
+      }
+
+      else if (topic === `${env.MQTT_BASE_TOPIC}/sensor3`) {
+        const data = JSON.parse(msgStr);
+        const tele = this.ensureLatestTelemetry();
+        if (data.tempair !== undefined) tele.water_t = data.tempair;
+        if (data.ec !== undefined) tele.ec = data.ec;
+        if (data.tds !== undefined) tele.tds = data.tds;
+        tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        influxService.writeTelemetry(tele);
+        this.notifySubscribers('telemetry', tele);
+      }
+
+      else if (topic === `${env.MQTT_BASE_TOPIC}/sensor4`) {
+        const data = JSON.parse(msgStr);
+        const tele = this.ensureLatestTelemetry();
+        if (data.suhu !== undefined) tele.water_t = data.suhu;
+        if (data.ph !== undefined) tele.ph = data.ph;
+        tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        influxService.writeTelemetry(tele);
+        this.notifySubscribers('telemetry', tele);
+      }
+
+      else if (topic === `${env.MQTT_BASE_TOPIC}/sensor6`) {
+        const data = JSON.parse(msgStr);
+        const tele = this.ensureLatestTelemetry();
+        if (data.jarak !== undefined) tele.dist_mm = data.jarak;
+        if (data.level !== undefined) tele.level_pct = data.level;
+        tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        influxService.writeTelemetry(tele);
+        this.notifySubscribers('telemetry', tele);
+      }
+
+      // 3. Heartbeat & Diagnostics
       else if (topic === `${env.MQTT_BASE_TOPIC}/status`) {
         const data: DeviceStatusPayload = JSON.parse(msgStr);
         this.latestDeviceStatus = data;
@@ -111,6 +173,7 @@ class MqttService {
         this.notifySubscribers('status', data);
       }
 
+      // 4. Relay States
       else if (topic === `${env.MQTT_RELAY_TOPIC}/state`) {
         const data = JSON.parse(msgStr);
         this.latestRelayState = {
@@ -123,6 +186,16 @@ class MqttService {
         this.notifySubscribers('relay_state', this.latestRelayState);
       }
 
+      else if (topic.startsWith(`${env.MQTT_RELAY_TOPIC}/`) && topic.endsWith('/state')) {
+        const ch = topic.split('/')[3];
+        const state = msgStr.trim().toUpperCase() as 'ON' | 'OFF';
+        if (ch === '1') this.latestRelayState.relay1 = state;
+        if (ch === '2') this.latestRelayState.relay2 = state;
+        if (ch === '3') this.latestRelayState.relay3 = state;
+        if (ch === '4') this.latestRelayState.relay4 = state;
+        this.notifySubscribers('relay_state', this.latestRelayState);
+      }
+
       else if (topic === `${env.MQTT_RELAY_TOPIC}/status`) {
         const status = msgStr.trim();
         logger.info(`[MQTT] Controller LWT Status: ${status}`);
@@ -132,6 +205,7 @@ class MqttService {
         this.notifySubscribers('device_lwt', { status });
       }
 
+      // 5. Alarms & Events
       else if (topic === `${env.MQTT_BASE_TOPIC}/alarm`) {
         const data: AlarmPayload = JSON.parse(msgStr);
         const record = AlarmService.processAlarm(data);
