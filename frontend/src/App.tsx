@@ -5,7 +5,7 @@ import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import {
   Activity, AgricultureAnalytics, ChartLine, CheckmarkFilled, Chip, ConnectionSignal,
   Dashboard, DataBase, Humidity, Light, Meter, Notification, Power, Radio, RainDrop,
-  Sprout, Temperature, TemperatureWater, WarningAltFilled, Wifi, Windy,
+  Temperature, TemperatureWater, WarningAltFilled, Wifi, Windy,
 } from '@carbon/icons-react'
 import {
   Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -457,7 +457,9 @@ export default function App() {
       <header className="topbar">
         <div className="topbar-inner">
           <a className="brand" href="#ringkasan" aria-label="Hydra kembali ke ringkasan">
-            <span className="brand-mark"><Sprout size={24} /></span>
+            <span className="brand-mark" aria-hidden="true">
+              <img src="/brand/hydra-logo-mark.png" alt="" />
+            </span>
             <span><strong>HYDRA</strong><small>IoT Monitoring</small></span>
           </a>
           <nav className="scroll-nav" aria-label="Navigasi dashboard">
@@ -625,7 +627,10 @@ export default function App() {
       </main>
 
       <footer className="site-footer">
-        <div><Sprout size={22} /><strong>HYDRA</strong></div>
+        <div className="footer-brand">
+          <img src="/brand/hydra-favicon.png" alt="" aria-hidden="true" />
+          <strong>HYDRA</strong>
+        </div>
         <a href="#ringkasan">Kembali ke kondisi terbaru ↑</a>
         <span>ESP32-S3 / RS-485 / MQTT</span>
       </footer>
