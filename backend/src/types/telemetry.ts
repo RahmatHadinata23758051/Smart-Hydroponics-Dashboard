@@ -16,6 +16,7 @@ export interface TelemetryPayload {
   dist_mm: number | null;
   level_pct: number | null;
   relay: [number, number, number, number]; // [pompa_nutrisi, misting, exhaust_fan, lampu_grow] (0/1)
+  relay_known?: boolean; // true hanya setelah feedback relay/telemetry aktual diterima
 }
 
 export interface DeviceStatusPayload {

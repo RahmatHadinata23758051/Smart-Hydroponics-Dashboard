@@ -7,7 +7,8 @@ export const actuatorController = {
   getRelayStates: (req: Request, res: Response) => {
     return res.status(200).json({
       success: true,
-      data: mqttService.latestRelayState,
+      data: mqttService.relayStateReceived ? mqttService.latestRelayState : null,
+      known: mqttService.relayStateReceived,
     });
   },
 

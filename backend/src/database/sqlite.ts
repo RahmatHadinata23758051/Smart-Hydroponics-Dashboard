@@ -151,9 +151,9 @@ export const sqliteRepo = {
   getTelemetryRange: (from: string, to: string) => {
     return db.prepare(`
       SELECT * FROM telemetry_records
-      WHERE created_at BETWEEN ? AND ? OR timestamp BETWEEN ? AND ?
-      ORDER BY id ASC
-    `).all(from, to, from, to);
+      WHERE timestamp BETWEEN ? AND ?
+      ORDER BY timestamp ASC, id ASC
+    `).all(from, to);
   },
 
   // Alarms

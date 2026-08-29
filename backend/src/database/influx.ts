@@ -4,6 +4,100 @@ import { logger } from '../core/logger.js';
 import { TelemetryPayload, DeviceStatusPayload } from '../types/telemetry.js';
 import { sqliteRepo } from './sqlite.js';
 
+const TELEMETRY_FIELDS = [
+  'air_t', 'air_rh', 'lux', 'ec', 'tds', 'ph', 'water_t', 'dist_mm', 'level_pct',
+] as const;
+
+type TelemetryField = typeof TELEMETRY_FIELDS[number];
+type SqliteTelemetryRow = Record<TelemetryField, number | null> & {
+  timestamp: string;
+  ip: string;
+  relay1: number;
+  relay2: number;
+  relay3: number;
+  relay4: number;
+};
+
+const DURATION_UNITS: Record<string, number> = {
+  s: 1000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+};
+
+function durationToMs(value: string, fallback: number) {
+  const match = value.trim().match(/^-?(\d+)(s|m|h|d)$/);
+  if (!match) return fallback;
+  return Number(match[1]) * DURATION_UNITS[match[2]];
+}
+
+function toLocalSqliteTimestamp(date: Date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function querySqliteTelemetry(range: string, interval: string) {
+  const rangeMs = durationToMs(range, 24 * 3_600_000);
+  const intervalMs = Math.max(durationToMs(interval, 5 * 60_000), 1000);
+  const now = new Date();
+  const from = new Date(now.getTime() - rangeMs);
+  const rows = sqliteRepo.getTelemetryRange(
+    toLocalSqliteTimestamp(from),
+    toLocalSqliteTimestamp(now),
+  ) as SqliteTelemetryRow[];
+
+  const buckets = new Map<number, {
+    timestamp: string;
+    ip: string;
+    relays: [number, number, number, number];
+    totals: Record<TelemetryField, { sum: number; count: number }>;
+  }>();
+
+  for (const row of rows) {
+    const time = new Date(row.timestamp.replace(' ', 'T')).getTime();
+    if (!Number.isFinite(time)) continue;
+    const bucketTime = Math.floor(time / intervalMs) * intervalMs;
+    let bucket = buckets.get(bucketTime);
+
+    if (!bucket) {
+      bucket = {
+        timestamp: toLocalSqliteTimestamp(new Date(bucketTime)),
+        ip: row.ip,
+        relays: [row.relay1, row.relay2, row.relay3, row.relay4],
+        totals: Object.fromEntries(
+          TELEMETRY_FIELDS.map(field => [field, { sum: 0, count: 0 }]),
+        ) as Record<TelemetryField, { sum: number; count: number }>,
+      };
+      buckets.set(bucketTime, bucket);
+    }
+
+    bucket.ip = row.ip || bucket.ip;
+    bucket.relays = [row.relay1, row.relay2, row.relay3, row.relay4];
+    for (const field of TELEMETRY_FIELDS) {
+      const value = row[field];
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) continue;
+      bucket.totals[field].sum += Number(value);
+      bucket.totals[field].count += 1;
+    }
+  }
+
+  return [...buckets.entries()]
+    .sort(([left], [right]) => left - right)
+    .slice(-720)
+    .map(([, bucket]) => ({
+    timestamp: bucket.timestamp,
+    ip: bucket.ip,
+    ...Object.fromEntries(TELEMETRY_FIELDS.map(field => {
+      const value = bucket.totals[field];
+      return [field, value.count ? value.sum / value.count : null];
+    })),
+    relay1: bucket.relays[0],
+    relay2: bucket.relays[1],
+    relay3: bucket.relays[2],
+    relay4: bucket.relays[3],
+    }));
+}
+
 class InfluxService {
   private client: InfluxDB | null = null;
   private writeApi: WriteApi | null = null;
@@ -95,8 +189,7 @@ class InfluxService {
 
   public async queryTelemetry(range: string = '-24h', interval: string = '5m') {
     if (!this.isEnabled || !this.queryApi) {
-      // Fallback query to SQLite
-      return sqliteRepo.getTelemetryHistory(200);
+      return querySqliteTelemetry(range, interval);
     }
 
     const fluxQuery = `
@@ -125,7 +218,7 @@ class InfluxService {
       return rows;
     } catch (err) {
       logger.error('Influx query error, falling back to SQLite:', err);
-      return sqliteRepo.getTelemetryHistory(200);
+      return querySqliteTelemetry(range, interval);
     }
   }
 }

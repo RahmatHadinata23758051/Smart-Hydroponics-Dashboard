@@ -11,6 +11,7 @@ export interface Telemetry {
   dist_mm: number | null
   level_pct: number | null
   relay: [number, number, number, number]
+  relay_known?: boolean
 }
 
 export interface DeviceStatus {

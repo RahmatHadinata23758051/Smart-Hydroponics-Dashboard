@@ -3,6 +3,12 @@ import { mqttService } from '../services/mqtt.service.js';
 import { sqliteRepo } from '../database/sqlite.js';
 import { influxService } from '../database/influx.js';
 
+const HISTORY_PRESETS: Record<string, string> = {
+  '-1h': '1m',
+  '-24h': '5m',
+  '-30d': '1h',
+};
+
 export const telemetryController = {
   getLatest: (req: Request, res: Response) => {
     // Ambil dari in-memory cache atau fallback ke DB
@@ -25,9 +31,18 @@ export const telemetryController = {
   getHistory: async (req: Request, res: Response) => {
     try {
       const range = (req.query.range as string) || '-24h';
-      const interval = (req.query.interval as string) || '5m';
-      const limit = Number(req.query.limit) || 100;
-      const offset = Number(req.query.offset) || 0;
+      const interval = (req.query.interval as string) || HISTORY_PRESETS[range];
+
+      if (!HISTORY_PRESETS[range] || interval !== HISTORY_PRESETS[range]) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid history range or interval preset.',
+          allowed: Object.entries(HISTORY_PRESETS).map(([allowedRange, allowedInterval]) => ({
+            range: allowedRange,
+            interval: allowedInterval,
+          })),
+        });
+      }
 
       // Query dari InfluxDB atau SQLite
       const data = await influxService.queryTelemetry(range, interval);
