@@ -1,13 +1,17 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/app.js';
-import { initSQLiteSchema, sqliteRepo } from '../src/database/sqlite.js';
+import { db, initSQLiteSchema, sqliteRepo } from '../src/database/sqlite.js';
 import { mqttService } from '../src/services/mqtt.service.js';
 import { ActuatorService } from '../src/services/actuator.service.js';
 
 describe('Comprehensive End-to-End Feature Verification', () => {
   beforeAll(() => {
     initSQLiteSchema();
+  });
+
+  afterAll(() => {
+    db.prepare('DELETE FROM telemetry_records WHERE ip = ?').run('range-integration-test');
   });
 
   describe('1. Health & Meta Endpoints', () => {
@@ -57,6 +61,69 @@ describe('Comprehensive End-to-End Feature Verification', () => {
       expect(Array.isArray(res.body.data)).toBe(true);
     });
 
+    it('GET /api/v1/telemetry/history should enforce every dashboard time preset', async () => {
+      const receivedAt = new Date(Date.now() - 30_000);
+      const localTimestamp = new Date(receivedAt.getTime() - receivedAt.getTimezoneOffset() * 60_000)
+        .toISOString()
+        .slice(0, 19)
+        .replace('T', ' ');
+
+      sqliteRepo.insertTelemetry({
+        timestamp: localTimestamp,
+        ip: 'range-integration-test',
+        air_t: 27.4,
+        air_rh: 68.2,
+        lux: 17342,
+        ec: 1688,
+        tds: 844,
+        ph: 6.08,
+        water_t: 25.6,
+        dist_mm: 520,
+        level_pct: 48.0,
+        relay: [0, 0, 0, 0],
+      });
+
+      const presets = [
+        { range: '-1h', interval: '1m', durationMs: 60 * 60_000, bucketMinutes: 1 },
+        { range: '-24h', interval: '5m', durationMs: 24 * 60 * 60_000, bucketMinutes: 5 },
+        { range: '-30d', interval: '1h', durationMs: 30 * 24 * 60 * 60_000, bucketMinutes: 60 },
+      ];
+
+      for (const preset of presets) {
+        const res = await request(app)
+          .get(`/api/v1/telemetry/history?range=${preset.range}&interval=${preset.interval}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.meta).toMatchObject({
+          range: preset.range,
+          interval: preset.interval,
+          count: res.body.data.length,
+        });
+        expect(res.body.data.length).toBeGreaterThan(0);
+        expect(res.body.data.length).toBeLessThanOrEqual(720);
+
+        for (const row of res.body.data) {
+          const timestamp = row.timestamp || row._time;
+          const time = new Date(timestamp.includes('T') ? timestamp : timestamp.replace(' ', 'T'));
+          expect(time.getTime()).toBeGreaterThanOrEqual(Date.now() - preset.durationMs - 60_000);
+          expect(time.getTime()).toBeLessThanOrEqual(Date.now() + 60_000);
+          expect(time.getSeconds()).toBe(0);
+          if (preset.bucketMinutes < 60) {
+            expect(time.getMinutes() % preset.bucketMinutes).toBe(0);
+          } else {
+            expect(time.getMinutes()).toBe(0);
+          }
+        }
+      }
+    });
+
+    it('GET /api/v1/telemetry/history should reject mismatched range and interval', async () => {
+      const res = await request(app).get('/api/v1/telemetry/history?range=-30d&interval=1m');
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.allowed).toHaveLength(3);
+    });
+
     it('GET /api/v1/telemetry/export should return valid CSV content', async () => {
       const res = await request(app).get('/api/v1/telemetry/export');
       expect(res.status).toBe(200);
@@ -72,10 +139,15 @@ describe('Comprehensive End-to-End Feature Verification', () => {
       const res = await request(app).get('/api/v1/relays/state');
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toHaveProperty('relay1');
-      expect(res.body.data).toHaveProperty('relay2');
-      expect(res.body.data).toHaveProperty('relay3');
-      expect(res.body.data).toHaveProperty('relay4');
+      expect(typeof res.body.known).toBe('boolean');
+      if (res.body.known) {
+        expect(res.body.data).toHaveProperty('relay1');
+        expect(res.body.data).toHaveProperty('relay2');
+        expect(res.body.data).toHaveProperty('relay3');
+        expect(res.body.data).toHaveProperty('relay4');
+      } else {
+        expect(res.body.data).toBeNull();
+      }
     });
 
     it('POST /api/v1/relays/1/command should validate action and record log', async () => {

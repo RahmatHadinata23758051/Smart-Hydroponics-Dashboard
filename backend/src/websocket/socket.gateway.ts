@@ -30,7 +30,9 @@ export class SocketGateway {
       if (mqttService.latestDeviceStatus) {
         socket.emit('status:live', mqttService.latestDeviceStatus);
       }
-      socket.emit('relay:state', mqttService.latestRelayState);
+      if (mqttService.relayStateReceived) {
+        socket.emit('relay:state', mqttService.latestRelayState);
+      }
 
       socket.on('disconnect', () => {
         logger.info(`🔌 Web Client disconnected: ${socket.id} (Remaining: ${this.io.engine.clientsCount})`);

@@ -28,6 +28,7 @@ class MqttService {
     relay3: 'OFF',
     relay4: 'OFF',
   };
+  public relayStateReceived: boolean = false;
 
   public init() {
     const brokerUrl = `mqtt://${env.MQTT_HOST}:${env.MQTT_PORT}`;
@@ -96,6 +97,7 @@ class MqttService {
           this.latestRelayState.relay3 === 'ON' ? 1 : 0,
           this.latestRelayState.relay4 === 'ON' ? 1 : 0,
         ],
+        relay_known: this.relayStateReceived,
       };
     }
     return this.latestTelemetry;
@@ -108,7 +110,9 @@ class MqttService {
       // 1. Telemetri Agregat Utama
       if (topic === `${env.MQTT_BASE_TOPIC}/telemetry`) {
         const data: TelemetryPayload = JSON.parse(msgStr);
+        data.relay_known = true;
         this.latestTelemetry = data;
+        this.relayStateReceived = true;
 
         if (Array.isArray(data.relay) && data.relay.length === 4) {
           this.latestRelayState = {
@@ -176,6 +180,7 @@ class MqttService {
       // 4. Relay States
       else if (topic === `${env.MQTT_RELAY_TOPIC}/state`) {
         const data = JSON.parse(msgStr);
+        this.relayStateReceived = true;
         this.latestRelayState = {
           relay1: data.relay1 || this.latestRelayState.relay1,
           relay2: data.relay2 || this.latestRelayState.relay2,
@@ -183,16 +188,35 @@ class MqttService {
           relay4: data.relay4 || this.latestRelayState.relay4,
           rssi: data.rssi,
         };
+        if (this.latestTelemetry) {
+          this.latestTelemetry.relay = [
+            this.latestRelayState.relay1 === 'ON' ? 1 : 0,
+            this.latestRelayState.relay2 === 'ON' ? 1 : 0,
+            this.latestRelayState.relay3 === 'ON' ? 1 : 0,
+            this.latestRelayState.relay4 === 'ON' ? 1 : 0,
+          ];
+          this.latestTelemetry.relay_known = true;
+        }
         this.notifySubscribers('relay_state', this.latestRelayState);
       }
 
       else if (topic.startsWith(`${env.MQTT_RELAY_TOPIC}/`) && topic.endsWith('/state')) {
         const ch = topic.split('/')[3];
         const state = msgStr.trim().toUpperCase() as 'ON' | 'OFF';
+        this.relayStateReceived = true;
         if (ch === '1') this.latestRelayState.relay1 = state;
         if (ch === '2') this.latestRelayState.relay2 = state;
         if (ch === '3') this.latestRelayState.relay3 = state;
         if (ch === '4') this.latestRelayState.relay4 = state;
+        if (this.latestTelemetry) {
+          this.latestTelemetry.relay = [
+            this.latestRelayState.relay1 === 'ON' ? 1 : 0,
+            this.latestRelayState.relay2 === 'ON' ? 1 : 0,
+            this.latestRelayState.relay3 === 'ON' ? 1 : 0,
+            this.latestRelayState.relay4 === 'ON' ? 1 : 0,
+          ];
+          this.latestTelemetry.relay_known = true;
+        }
         this.notifySubscribers('relay_state', this.latestRelayState);
       }
 

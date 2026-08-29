@@ -1,9 +1,22 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { io } from 'socket.io-client'
 import type { AlarmRecord, ChartPoint, DeviceStatus, MqttStatus, RelayState, Telemetry } from './types'
 
 const API = import.meta.env.VITE_API_URL || ''
 const EMPTY_RELAYS: RelayState = [false, false, false, false]
+
+export type HistoryRange = '1h' | '24h' | '30d'
+
+const HISTORY_QUERY: Record<HistoryRange, {
+  range: string
+  interval: string
+  rangeMs: number
+  intervalMs: number
+}> = {
+  '1h': { range: '-1h', interval: '1m', rangeMs: 60 * 60_000, intervalMs: 60_000 },
+  '24h': { range: '-24h', interval: '5m', rangeMs: 24 * 60 * 60_000, intervalMs: 5 * 60_000 },
+  '30d': { range: '-30d', interval: '1h', rangeMs: 30 * 24 * 60 * 60_000, intervalMs: 60 * 60_000 },
+}
 
 type HistoryRow = Partial<Telemetry> & {
   _field?: keyof Telemetry
@@ -60,11 +73,11 @@ function normalizeHistory(rows: HistoryRow[]): ChartPoint[] {
   return normalized
     .filter(point => point.timestamp)
     .sort((a, b) => parseDate(a.timestamp).getTime() - parseDate(b.timestamp).getTime())
-    .slice(-120)
+    .slice(-720)
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${API}${path}`)
+async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(`${API}${path}`, { signal })
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
   return response.json() as Promise<T>
 }
@@ -76,47 +89,103 @@ export function useHydroData() {
   const [history, setHistory] = useState<ChartPoint[]>([])
   const [alarms, setAlarms] = useState<AlarmRecord[]>([])
   const [relays, setRelays] = useState<RelayState>(EMPTY_RELAYS)
+  const [relayKnown, setRelayKnown] = useState(false)
   const [socketConnected, setSocketConnected] = useState(false)
   const [backendAvailable, setBackendAvailable] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [historyLoading, setHistoryLoading] = useState(true)
+  const [historyRange, setHistoryRange] = useState<HistoryRange>('24h')
+  const historyRangeRef = useRef<HistoryRange>('24h')
   const [notice, setNotice] = useState('')
+
+  useEffect(() => {
+    historyRangeRef.current = historyRange
+  }, [historyRange])
 
   const ingest = useCallback((data: Telemetry) => {
     setTelemetry(data)
-    if (Array.isArray(data.relay) && data.relay.length === 4) {
+    if (data.relay_known === true && Array.isArray(data.relay) && data.relay.length === 4) {
       setRelays(data.relay.map(Boolean) as RelayState)
+      setRelayKnown(true)
     }
     setHistory(items => {
+      const preset = HISTORY_QUERY[historyRangeRef.current]
       const point = toChartPoint(data)
-      if (items.at(-1)?.timestamp === point.timestamp) return items
-      return [...items.slice(-119), point]
+      const pointTime = parseDate(point.timestamp).getTime()
+      if (!Number.isFinite(pointTime)) return items
+
+      const cutoff = Date.now() - preset.rangeMs
+      const visibleItems = items.filter(item => parseDate(item.timestamp).getTime() >= cutoff)
+      if (pointTime < cutoff) return visibleItems
+
+      const pointBucket = Math.floor(pointTime / preset.intervalMs)
+      const lastPoint = visibleItems.at(-1)
+      const lastBucket = lastPoint
+        ? Math.floor(parseDate(lastPoint.timestamp).getTime() / preset.intervalMs)
+        : null
+
+      if (lastPoint && lastBucket === pointBucket) {
+        return [...visibleItems.slice(0, -1), { ...lastPoint, ...point, timestamp: lastPoint.timestamp }]
+      }
+
+      return [...visibleItems, point].slice(-720)
     })
   }, [])
+
+  useEffect(() => {
+    let active = true
+    const controller = new AbortController()
+    const query = HISTORY_QUERY[historyRange]
+    setHistoryLoading(true)
+    setHistory([])
+
+    getJson<{ data: HistoryRow[] }>(
+      `/api/v1/telemetry/history?range=${query.range}&interval=${query.interval}`,
+      controller.signal,
+    )
+      .then(result => {
+        if (!active) return
+        setHistory(normalizeHistory(result.data || []))
+        setBackendAvailable(true)
+      })
+      .catch(error => {
+        if (!active) return
+        if (error instanceof Error && error.name === 'AbortError') return
+        setHistory([])
+      })
+      .finally(() => {
+        if (active) setHistoryLoading(false)
+      })
+
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [historyRange])
 
   useEffect(() => {
     let active = true
 
     Promise.allSettled([
       getJson<{ data: Telemetry | null }>('/api/v1/telemetry/latest'),
-      getJson<{ data: HistoryRow[] }>('/api/v1/telemetry/history?range=-24h&interval=5m'),
       getJson<{ data: { device: DeviceStatus | null; mqtt: MqttStatus } }>('/api/v1/diagnostics/health'),
-      getJson<{ data: Record<string, string> }>('/api/v1/relays/state'),
+      getJson<{ data: Record<string, string> | null; known: boolean }>('/api/v1/relays/state'),
       getJson<{ data: AlarmRecord[] }>('/api/v1/alarms?limit=8'),
     ]).then(results => {
       if (!active) return
-      const [latestResult, historyResult, healthResult, relayResult, alarmResult] = results
+      const [latestResult, healthResult, relayResult, alarmResult] = results
       const successful = results.some(result => result.status === 'fulfilled')
       setBackendAvailable(successful)
 
-      if (historyResult.status === 'fulfilled') setHistory(normalizeHistory(historyResult.value.data || []))
       if (latestResult.status === 'fulfilled' && latestResult.value.data) setTelemetry(latestResult.value.data)
       if (healthResult.status === 'fulfilled') {
         setStatus(healthResult.value.data.device)
         setMqtt(healthResult.value.data.mqtt)
       }
-      if (relayResult.status === 'fulfilled' && relayResult.value.data) {
+      if (relayResult.status === 'fulfilled' && relayResult.value.known && relayResult.value.data) {
         const value = relayResult.value.data
         setRelays([1, 2, 3, 4].map(index => value[`relay${index}`] === 'ON') as RelayState)
+        setRelayKnown(true)
       }
       if (alarmResult.status === 'fulfilled') setAlarms(alarmResult.value.data || [])
       setLoading(false)
@@ -135,6 +204,7 @@ export function useHydroData() {
     })
     socket.on('relay:state', (value: Record<string, string>) => {
       setRelays([1, 2, 3, 4].map(index => value[`relay${index}`] === 'ON') as RelayState)
+      setRelayKnown(true)
     })
     socket.on('alarm:new', (value: AlarmRecord) => {
       setAlarms(items => [value, ...items].slice(0, 8))
@@ -152,7 +222,7 @@ export function useHydroData() {
         body: JSON.stringify({ action }),
       })
       if (!response.ok) throw new Error()
-      setNotice(`Perintah ${action} dikirim · menunggu konfirmasi perangkat`)
+      setNotice(`Perintah ${action} dikirim. Menunggu konfirmasi perangkat.`)
     } catch {
       setNotice('Perintah gagal dikirim. Backend atau broker MQTT tidak tersedia.')
     }
@@ -165,7 +235,8 @@ export function useHydroData() {
   }, [notice])
 
   return {
-    telemetry, status, mqtt, history, alarms, relays, socketConnected,
-    backendAvailable, loading, toggleRelay, notice,
+    telemetry, status, mqtt, history, alarms, relays, relayKnown, socketConnected,
+    backendAvailable, loading, historyLoading, historyRange, setHistoryRange,
+    toggleRelay, notice,
   }
 }
