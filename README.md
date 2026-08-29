@@ -319,3 +319,25 @@ Untuk membuat production build frontend:
 npm run build
 ```
 Hasil kompilasi siap saji akan berada pada folder `website/frontend/dist`.
+
+---
+
+## 8. Deployment Kontainer Menggunakan Docker & Portainer
+
+Project ini telah disiapkan untuk deployment langsung ke **Portainer** atau **Docker Compose**:
+
+### Menjalankan dengan Docker Compose Lokal
+```powershell
+cd website
+docker compose up -d --build
+```
+
+### Deployment via Portainer Stack
+1. Buka Portainer -> **Stacks** -> **+ Add stack**.
+2. Masukkan nama stack (contoh: `hydra-hydroponics`).
+3. Pilih **Web editor**, salin konten [`docker-compose.yml`](./docker-compose.yml).
+4. Di bagian **Environment variables**, tempel variabel dari [`.env.example`](./.env.example).
+5. Klik **Deploy the stack**.
+
+Lihat panduan lengkap langkah demi langkah di [PORTAINER_GUIDE.md](./PORTAINER_GUIDE.md).
+
