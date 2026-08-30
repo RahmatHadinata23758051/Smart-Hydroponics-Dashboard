@@ -18,10 +18,6 @@ COPY index.html ./
 COPY public/ ./public/
 COPY src/ ./src/
 
-# Pass build-time environment variable (default empty string for relative proxy)
-ARG VITE_API_URL=""
-ENV VITE_API_URL=$VITE_API_URL
-
 # Build production SPA
 RUN npm run build
 
