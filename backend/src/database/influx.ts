@@ -117,7 +117,11 @@ class InfluxService {
 
     try {
       this.client = new InfluxDB({ url: env.INFLUX_URL, token: env.INFLUX_TOKEN });
-      this.writeApi = this.client.getWriteApi(env.INFLUX_ORG, env.INFLUX_BUCKET, 'ns');
+      this.writeApi = this.client.getWriteApi(env.INFLUX_ORG, env.INFLUX_BUCKET, 'ns', {
+        writeFailed: (error, _lines, retryAttempts) => {
+          logger.warn(`InfluxDB background write failed (attempt ${retryAttempts}):`, error.message);
+        },
+      });
       this.queryApi = this.client.getQueryApi(env.INFLUX_ORG);
       this.isEnabled = true;
       logger.info(`InfluxDB client connected to ${env.INFLUX_URL} (Org: ${env.INFLUX_ORG}, Bucket: ${env.INFLUX_BUCKET})`);
@@ -141,7 +145,7 @@ class InfluxService {
     try {
       const point = new Point('hydro_telemetry')
         .tag('device_id', 'hydro-s3-01')
-        .tag('ip', t.ip);
+        .tag('ip', t.ip || '0.0.0.0');
 
       if (t.air_t !== null) point.floatField('air_t', t.air_t);
       if (t.air_rh !== null) point.floatField('air_rh', t.air_rh);
@@ -159,7 +163,9 @@ class InfluxService {
       point.intField('relay_light', t.relay[3]);
 
       this.writeApi.writePoint(point);
-      this.writeApi.flush();
+      this.writeApi.flush().catch((err) => {
+        logger.debug('InfluxDB flush warning:', err.message);
+      });
     } catch (err) {
       logger.error('Failed to write point to InfluxDB:', err);
     }
@@ -181,7 +187,9 @@ class InfluxService {
         .intField('maint', hb.maint);
 
       this.writeApi.writePoint(point);
-      this.writeApi.flush();
+      this.writeApi.flush().catch((err) => {
+        logger.debug('InfluxDB heartbeat flush warning:', err.message);
+      });
     } catch (err) {
       logger.error('Failed to write heartbeat to InfluxDB:', err);
     }
