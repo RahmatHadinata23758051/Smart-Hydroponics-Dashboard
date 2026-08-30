@@ -10,14 +10,18 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   CORS_ORIGIN: z.string().default('*'),
 
-  // MQTT Settings
+  // MQTT Settings — harus cocok dengan firmware config.c
+  // Firmware MQTT_BASE = "hydroponik/unit01"
+  // Firmware MQTT_CLIENT_ID = "hydroponik" — backend harus pakai ID BERBEDA
   MQTT_HOST: z.string().default('sdp.polinela.ac.id'),
   MQTT_PORT: z.string().default('1883').transform(Number),
   MQTT_USERNAME: z.string().default(''),
   MQTT_PASSWORD: z.string().default(''),
   MQTT_CLIENT_ID: z.string().default(`hydro-backend-${Math.random().toString(16).substring(2, 8)}`),
-  MQTT_BASE_TOPIC: z.string().default('hidroponik/lab'),
-  MQTT_RELAY_TOPIC: z.string().default('hidroponik/lab/relay'),
+  MQTT_BASE_TOPIC: z.string().default('hydroponik/unit01'),
+
+  // Legacy topics — perangkat lain mungkin masih publish ke prefix ini
+  MQTT_LEGACY_TOPICS: z.string().default('hidroponik/lab,polinela/lab'),
 
   // InfluxDB Settings
   INFLUX_URL: z.string().default('http://localhost:9386'),
@@ -40,3 +44,4 @@ export const env = {
   ...parsed.data,
   SQLITE_FULL_PATH: path.resolve(process.cwd(), parsed.data.SQLITE_DB_PATH),
 };
+

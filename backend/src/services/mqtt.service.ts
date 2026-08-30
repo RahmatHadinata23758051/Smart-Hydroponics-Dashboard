@@ -14,6 +14,15 @@ import { AlarmService } from './alarm.service.js';
 
 export type MessageCallback = (channel: string, payload: any) => void;
 
+// =====================================================================
+//  Utilitas
+// =====================================================================
+
+/**
+ * Parse JSON aman — mengembalikan null bila bukan JSON valid.
+ * Firmware mengirim plain text untuk beberapa topik (misal: "offline", "ON"),
+ * sehingga kita TIDAK boleh langsung JSON.parse().
+ */
 function safeJsonParse<T = any>(str: string): T | null {
   try {
     const trimmed = str.trim();
@@ -25,6 +34,21 @@ function safeJsonParse<T = any>(str: string): T | null {
     return null;
   }
 }
+
+// =====================================================================
+//  MqttService
+//
+//  Subscribe ke:
+//    1. {MQTT_BASE_TOPIC}/# — topik utama firmware (hydroponik/unit01/#)
+//    2. Legacy topics — perangkat lain yang masih publish ke prefix lama
+//
+//  Topik firmware (dari config.c & HydroController.ino):
+//    {BASE}/status     → heartbeat JSON (retained) + LWT {"status":"offline"}
+//    {BASE}/telemetry  → telemetri agregat JSON (sensor + relay + dosing)
+//    {BASE}/alarm      → alarm individual JSON
+//    {BASE}/event      → event JSON (boot, relay, guard_trip, dose_*, manual_*)
+//    {BASE}/cmd        → (subscribe) menerima perintah: r1on, r1off, reset, dll.
+// =====================================================================
 
 class MqttService {
   private client: MqttClient | null = null;
@@ -59,15 +83,21 @@ class MqttService {
       this.isConnected = true;
       logger.info('✅ MQTT Broker connected successfully!');
 
-      // Subscribe ke seluruh variasi topik (mendukung hidroponik/lab dan polinela/lab)
+      // Build subscription list
       const topicSet = new Set<string>([
+        // Topik utama firmware — hydroponik/unit01/#
         `${env.MQTT_BASE_TOPIC}/#`,
-        `${env.MQTT_RELAY_TOPIC}/#`,
-        'hidroponik/lab/#',
-        'hidroponik/lab/relay/#',
-        'polinela/lab/#',
-        'polinela/lab/relay/#',
       ]);
+
+      // Legacy topics dari perangkat lain (jika dikonfigurasi)
+      const legacyTopics = env.MQTT_LEGACY_TOPICS
+        .split(',')
+        .map(t => t.trim())
+        .filter(t => t.length > 0);
+
+      for (const lt of legacyTopics) {
+        topicSet.add(`${lt}/#`);
+      }
 
       const topics = Array.from(topicSet);
 
@@ -95,6 +125,10 @@ class MqttService {
     });
   }
 
+  // =====================================================================
+  //  Inisialisasi telemetry cache
+  // =====================================================================
+
   private ensureLatestTelemetry(): TelemetryPayload {
     if (!this.latestTelemetry) {
       this.latestTelemetry = {
@@ -121,21 +155,32 @@ class MqttService {
     return this.latestTelemetry;
   }
 
+  // =====================================================================
+  //  Dispatcher pesan masuk — route berdasar suffix topik
+  // =====================================================================
+
   private handleIncomingMessage(topic: string, msgStr: string) {
     const raw = msgStr.trim();
     logger.debug(`[MQTT RX] Topic: ${topic} | Msg: ${raw}`);
 
     try {
-      // -----------------------------------------------------------------------
-      // 1. Telemetri Agregat Utama (misal: hidroponik/lab/telemetry atau polinela/lab/telemetry)
-      // -----------------------------------------------------------------------
+      // -------------------------------------------------------------------
+      // 1. Telemetri Agregat
+      //    Topic: {BASE}/telemetry
+      //    Firmware publishTelemetry() L936-967
+      // -------------------------------------------------------------------
       if (topic.endsWith('/telemetry')) {
         const data = safeJsonParse<TelemetryPayload>(raw);
         if (data) {
+          // Field yang firmware TIDAK kirim — kita tambahkan
+          data.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          data.ip = this.latestDeviceStatus?.ip || '0.0.0.0';
           data.relay_known = true;
+
           this.latestTelemetry = data;
           this.relayStateReceived = true;
 
+          // Sinkron relay state cache dari array
           if (Array.isArray(data.relay) && data.relay.length === 4) {
             this.latestRelayState = {
               relay1: data.relay[0] ? 'ON' : 'OFF',
@@ -151,9 +196,11 @@ class MqttService {
         return;
       }
 
-      // -----------------------------------------------------------------------
-      // 2. Parser Topik Sensor Individual (sensor1 - sensor6)
-      // -----------------------------------------------------------------------
+      // -------------------------------------------------------------------
+      // 2. Sensor Individual (legacy — dari perangkat lain, bukan HydroController)
+      //    Topic: {legacy_prefix}/sensor1..6
+      //    Dipertahankan untuk backward compatibility.
+      // -------------------------------------------------------------------
       if (topic.endsWith('/sensor1') || topic.endsWith('/sensor2')) {
         const data = safeJsonParse<any>(raw);
         if (data) {
@@ -195,7 +242,7 @@ class MqttService {
       }
 
       if (topic.endsWith('/sensor5')) {
-        // Sensor Hujan (rain detector)
+        // Sensor Hujan (rain detector) — log saja
         const data = safeJsonParse<any>(raw);
         logger.debug('[MQTT RX] Sensor5 (Rain):', data);
         return;
@@ -214,9 +261,12 @@ class MqttService {
         return;
       }
 
-      // -----------------------------------------------------------------------
-      // 3. Relay Individual Channel State: .../relay/1/state s.d. .../relay/4/state
-      // -----------------------------------------------------------------------
+      // -------------------------------------------------------------------
+      // 3. Relay Individual Channel State (legacy)
+      //    Topic: {legacy_prefix}/relay/1/state ... /relay/4/state
+      //    Firmware HydroController TIDAK publish ke topik ini.
+      //    Dipertahankan untuk backward compatibility dengan perangkat lain.
+      // -------------------------------------------------------------------
       const relayChannelMatch = topic.match(/\/relay\/([1-4])\/state$/);
       if (relayChannelMatch) {
         const ch = relayChannelMatch[1];
@@ -248,9 +298,10 @@ class MqttService {
         return;
       }
 
-      // -----------------------------------------------------------------------
-      // 4. Relay Aggregate State: .../relay/state
-      // -----------------------------------------------------------------------
+      // -------------------------------------------------------------------
+      // 4. Relay Aggregate State (legacy)
+      //    Topic: {legacy_prefix}/relay/state
+      // -------------------------------------------------------------------
       if (topic.endsWith('/relay/state')) {
         const data = safeJsonParse<any>(raw);
         if (data && typeof data === 'object') {
@@ -278,12 +329,22 @@ class MqttService {
         return;
       }
 
-      // -----------------------------------------------------------------------
+      // -------------------------------------------------------------------
       // 5. Status / LWT (Heartbeat & Controller LWT)
-      // -----------------------------------------------------------------------
+      //    Topic: {BASE}/status
+      //
+      //    Firmware publishHeartbeat() L969-979:
+      //    {"status":"online","uptime_s":3600,"rssi":-42,"heap":240000,
+      //     "bus_tx":5000,"bus_err":12,"bus_err_pct":0.24,"maint":0}
+      //
+      //    LWT (offline): {"status":"offline"}
+      //
+      //    Plain text "offline"/"online" dari perangkat legacy juga di-handle.
+      // -------------------------------------------------------------------
       if (topic.endsWith('/status')) {
-        // Cek jika status adalah plain text LWT (misal: "offline" atau "online")
         const lower = raw.toLowerCase();
+
+        // Plain text LWT (legacy)
         if (lower === 'offline' || lower === 'online') {
           logger.info(`[MQTT] Controller LWT Status -> ${lower} (Topic: ${topic})`);
           if (this.latestDeviceStatus) {
@@ -291,7 +352,6 @@ class MqttService {
           } else {
             this.latestDeviceStatus = {
               status: lower as 'online' | 'offline',
-              ip: '0.0.0.0',
               uptime_s: 0,
               rssi: 0,
               heap: 0,
@@ -306,19 +366,31 @@ class MqttService {
           return;
         }
 
-        // Cek jika status adalah JSON object (Heartbeat payload)
+        // JSON heartbeat (firmware format)
         const data = safeJsonParse<DeviceStatusPayload>(raw);
         if (data && typeof data === 'object') {
+          // Firmware tidak mengirim timestamp/ip — kita tambahkan
+          if (!data.timestamp) {
+            data.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          }
           this.latestDeviceStatus = data;
           influxService.writeHeartbeat(data);
           this.notifySubscribers('status', data);
+
+          // Jika status = online setelah offline, notify subscribers
+          if (data.status === 'online') {
+            this.notifySubscribers('device_lwt', { status: 'online' });
+          }
         }
         return;
       }
 
-      // -----------------------------------------------------------------------
-      // 6. Alarms & Events
-      // -----------------------------------------------------------------------
+      // -------------------------------------------------------------------
+      // 6. Alarms
+      //    Topic: {BASE}/alarm
+      //    Firmware publishAlarm() L893-904:
+      //    {"code":"C01a","state":"active","level":"critical","ts":12345}
+      // -------------------------------------------------------------------
       if (topic.endsWith('/alarm')) {
         const data = safeJsonParse<AlarmPayload>(raw);
         if (data) {
@@ -328,6 +400,15 @@ class MqttService {
         return;
       }
 
+      // -------------------------------------------------------------------
+      // 7. Events
+      //    Topic: {BASE}/event
+      //    Firmware publishEvent() L884-891:
+      //    {"kind":"relay","detail":"pompa_nutrisi","ts":12345}
+      //    {"kind":"dose_start","detail":"","ts":12345}
+      //    {"kind":"manual_on","detail":"misting","ts":12345}
+      //    {"kind":"guard_trip","detail":"exhaust_fan","ts":12345,"buffered":true}
+      // -------------------------------------------------------------------
       if (topic.endsWith('/event')) {
         const data = safeJsonParse<EventPayload>(raw);
         if (data) {
@@ -345,6 +426,10 @@ class MqttService {
       logger.error(`Error processing message on topic ${topic}:`, err);
     }
   }
+
+  // =====================================================================
+  //  Public API
+  // =====================================================================
 
   public subscribeEvents(cb: MessageCallback) {
     this.subscribers.push(cb);
