@@ -211,13 +211,9 @@ export function useHydroData() {
       setLoading(false)
     })
 
-    const socketUrl = API || (typeof window !== 'undefined' ? window.location.origin : '')
-    const socket = io(socketUrl, {
-      path: '/socket.io',
-      transports: ['websocket', 'polling'],
-      timeout: 5000,
-      reconnectionDelay: 2000,
-    })
+    const socket = API
+      ? io(API, { path: '/socket.io', transports: ['websocket', 'polling'], timeout: 5000, reconnectionDelay: 2000 })
+      : io({ path: '/socket.io', transports: ['websocket', 'polling'], timeout: 5000, reconnectionDelay: 2000 })
     socket.on('connect', () => { setSocketConnected(true); setBackendAvailable(true) })
     socket.on('disconnect', () => setSocketConnected(false))
     socket.on('connect_error', () => setSocketConnected(false))
