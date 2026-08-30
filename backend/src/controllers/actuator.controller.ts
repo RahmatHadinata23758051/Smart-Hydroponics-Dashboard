@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { ActuatorService } from '../services/actuator.service.js';
-import { RelayChannel, RelayAction } from '../types/telemetry.js';
+import { RelayChannel, RelayAction, SystemCommand } from '../types/telemetry.js';
 import { mqttService } from '../services/mqtt.service.js';
 
 export const actuatorController = {
@@ -23,10 +23,11 @@ export const actuatorController = {
       });
     }
 
-    if (!['ON', 'OFF', 'TOGGLE'].includes(action)) {
+    // Firmware hanya mengerti ON/OFF (via r{ch}on/r{ch}off)
+    if (!['ON', 'OFF'].includes(action)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid action. Must be ON, OFF, or TOGGLE.',
+        error: 'Invalid action. Must be ON or OFF.',
       });
     }
 
@@ -41,7 +42,7 @@ export const actuatorController = {
 
     return res.status(200).json({
       success: true,
-      message: `Command ${action} sent to Relay ${channel}.`,
+      message: `Command r${channel}${action.toLowerCase()} sent to firmware.`,
       channel,
       action,
     });
@@ -50,10 +51,10 @@ export const actuatorController = {
   triggerAllRelays: (req: Request, res: Response) => {
     const { action } = req.body as { action: RelayAction };
 
-    if (!['ON', 'OFF', 'TOGGLE'].includes(action)) {
+    if (!['ON', 'OFF'].includes(action)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid action. Must be ON, OFF, or TOGGLE.',
+        error: 'Invalid action. Must be ON or OFF.',
       });
     }
 
@@ -68,22 +69,49 @@ export const actuatorController = {
 
     return res.status(200).json({
       success: true,
-      message: `Command ${action} sent to all relays.`,
+      message: action === 'OFF'
+        ? 'Sent "auto" command — all relays returned to automatic control.'
+        : `Sent r1on..r4on commands to firmware.`,
       action,
     });
   },
 
+  /**
+   * Perintah sistem ke firmware.
+   *
+   * API menerima UPPERCASE untuk backward compat, tapi firmware butuh lowercase.
+   * Mapping:
+   *   RESET     → "reset"
+   *   MAINT_ON  → "maint_on"
+   *   MAINT_OFF → "maint_off"
+   *   AUTO      → "auto"
+   */
   triggerSystemCommand: (req: Request, res: Response) => {
-    const { command } = req.body as { command: 'RESET' | 'MAINT_ON' | 'MAINT_OFF' };
+    const { command } = req.body as { command: string };
 
-    if (!['RESET', 'MAINT_ON', 'MAINT_OFF'].includes(command)) {
+    // Mapping uppercase API → lowercase firmware command
+    const commandMap: Record<string, SystemCommand> = {
+      RESET: 'reset',
+      MAINT_ON: 'maint_on',
+      MAINT_OFF: 'maint_off',
+      AUTO: 'auto',
+      // Juga terima lowercase langsung
+      reset: 'reset',
+      maint_on: 'maint_on',
+      maint_off: 'maint_off',
+      auto: 'auto',
+    };
+
+    const firmwareCmd = commandMap[command];
+
+    if (!firmwareCmd) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid system command. Must be RESET, MAINT_ON, or MAINT_OFF.',
+        error: 'Invalid system command. Must be RESET, MAINT_ON, MAINT_OFF, or AUTO.',
       });
     }
 
-    const ok = ActuatorService.sendSystemCommand(command);
+    const ok = ActuatorService.sendSystemCommand(firmwareCmd);
 
     if (!ok) {
       return res.status(503).json({
@@ -94,8 +122,8 @@ export const actuatorController = {
 
     return res.status(200).json({
       success: true,
-      message: `System command ${command} sent successfully.`,
-      command,
+      message: `System command "${firmwareCmd}" sent to firmware.`,
+      command: firmwareCmd,
     });
   },
 };
