@@ -149,11 +149,17 @@ export const sqliteRepo = {
   },
 
   getTelemetryRange: (from: string, to: string) => {
+    // Normalisasi format pencarian untuk mengakomodasi format ISO dan space-separated
+    const fromSpace = from.includes('T') ? from.replace('T', ' ').slice(0, 19) : from;
+    const toSpace = to.includes('T') ? to.replace('T', ' ').slice(0, 19) : to;
+    const fromIso = from.includes('T') ? from : from.replace(' ', 'T') + 'Z';
+    const toIso = to.includes('T') ? to : to.replace(' ', 'T') + 'Z';
+
     return db.prepare(`
       SELECT * FROM telemetry_records
-      WHERE timestamp BETWEEN ? AND ?
+      WHERE (timestamp BETWEEN ? AND ?) OR (timestamp BETWEEN ? AND ?)
       ORDER BY timestamp ASC, id ASC
-    `).all(from, to);
+    `).all(fromSpace, toSpace, fromIso, toIso);
   },
 
   // Alarms

@@ -65,6 +65,7 @@ class MqttService {
     relay4: 'OFF',
   };
   public relayStateReceived: boolean = false;
+  private relayCommandTime: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0 };
 
   public init() {
     const brokerUrl = `mqtt://${env.MQTT_HOST}:${env.MQTT_PORT}`;
@@ -132,7 +133,7 @@ class MqttService {
   private ensureLatestTelemetry(): TelemetryPayload {
     if (!this.latestTelemetry) {
       this.latestTelemetry = {
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        timestamp: new Date().toISOString(),
         ip: this.latestDeviceStatus?.ip || '0.0.0.0',
         air_t: null,
         air_rh: null,
@@ -173,20 +174,27 @@ class MqttService {
         const data = safeJsonParse<TelemetryPayload>(raw);
         if (data) {
           // Field yang firmware TIDAK kirim — kita tambahkan
-          data.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          data.timestamp = new Date().toISOString();
           data.ip = this.latestDeviceStatus?.ip || '0.0.0.0';
           data.relay_known = true;
 
           this.latestTelemetry = data;
           this.relayStateReceived = true;
 
-          // Sinkron relay state cache dari array
+          // Sinkron relay state cache dari array (dengan proteksi race condition)
           if (Array.isArray(data.relay) && data.relay.length === 4) {
+            const now = Date.now();
+            const r1 = (now - this.relayCommandTime[1] < 3500) ? (this.latestRelayState.relay1 === 'ON' ? 1 : 0) : Number(data.relay[0]);
+            const r2 = (now - this.relayCommandTime[2] < 3500) ? (this.latestRelayState.relay2 === 'ON' ? 1 : 0) : Number(data.relay[1]);
+            const r3 = (now - this.relayCommandTime[3] < 3500) ? (this.latestRelayState.relay3 === 'ON' ? 1 : 0) : Number(data.relay[2]);
+            const r4 = (now - this.relayCommandTime[4] < 3500) ? (this.latestRelayState.relay4 === 'ON' ? 1 : 0) : Number(data.relay[3]);
+
+            data.relay = [r1, r2, r3, r4];
             this.latestRelayState = {
-              relay1: data.relay[0] ? 'ON' : 'OFF',
-              relay2: data.relay[1] ? 'ON' : 'OFF',
-              relay3: data.relay[2] ? 'ON' : 'OFF',
-              relay4: data.relay[3] ? 'ON' : 'OFF',
+              relay1: r1 ? 'ON' : 'OFF',
+              relay2: r2 ? 'ON' : 'OFF',
+              relay3: r3 ? 'ON' : 'OFF',
+              relay4: r4 ? 'ON' : 'OFF',
             };
           }
 
@@ -207,7 +215,7 @@ class MqttService {
           const tele = this.ensureLatestTelemetry();
           if (data.temp !== undefined) tele.air_t = Number(data.temp);
           if (data.hum !== undefined) tele.air_rh = Number(data.hum);
-          tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          tele.timestamp = new Date().toISOString();
           influxService.writeTelemetry(tele);
           this.notifySubscribers('telemetry', tele);
         }
@@ -221,7 +229,7 @@ class MqttService {
           if (data.tempair !== undefined) tele.water_t = Number(data.tempair);
           if (data.ec !== undefined) tele.ec = Number(data.ec);
           if (data.tds !== undefined) tele.tds = Number(data.tds);
-          tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          tele.timestamp = new Date().toISOString();
           influxService.writeTelemetry(tele);
           this.notifySubscribers('telemetry', tele);
         }
@@ -234,7 +242,7 @@ class MqttService {
           const tele = this.ensureLatestTelemetry();
           if (data.suhu !== undefined) tele.water_t = Number(data.suhu);
           if (data.ph !== undefined) tele.ph = Number(data.ph);
-          tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          tele.timestamp = new Date().toISOString();
           influxService.writeTelemetry(tele);
           this.notifySubscribers('telemetry', tele);
         }
@@ -254,7 +262,7 @@ class MqttService {
           const tele = this.ensureLatestTelemetry();
           if (data.jarak !== undefined) tele.dist_mm = Number(data.jarak);
           if (data.level !== undefined) tele.level_pct = Number(data.level);
-          tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          tele.timestamp = new Date().toISOString();
           influxService.writeTelemetry(tele);
           this.notifySubscribers('telemetry', tele);
         }
@@ -418,6 +426,27 @@ class MqttService {
             is_buffered: !!data.buffered,
             timestamp: new Date(data.ts > 1000000000000 ? data.ts : Date.now()).toISOString(),
           });
+
+          // Tanggapi feedback event dari firmware secara reaktif
+          const relayMap: Record<string, 1 | 2 | 3 | 4> = {
+            pompa_nutrisi: 1,
+            misting: 2,
+            exhaust_fan: 3,
+            lampu_grow: 4,
+          };
+          const ch = relayMap[data.detail];
+          if (ch) {
+            if (data.kind === 'manual_on' || data.kind === 'relay') {
+              this.updateRelayState(ch, 'ON');
+            } else if (data.kind === 'manual_off' || data.kind === 'manual_denied' || data.kind === 'guard_trip') {
+              this.updateRelayState(ch, 'OFF');
+            }
+          } else if (data.kind === 'manual_auto') {
+            for (let i = 1; i <= 4; i++) {
+              this.updateRelayState(i as 1 | 2 | 3 | 4, 'OFF');
+            }
+          }
+
           this.notifySubscribers('event', data);
         }
         return;
@@ -430,6 +459,20 @@ class MqttService {
   // =====================================================================
   //  Public API
   // =====================================================================
+
+  public updateRelayState(channel: 1 | 2 | 3 | 4, action: 'ON' | 'OFF') {
+    this.relayStateReceived = true;
+    this.relayCommandTime[channel] = Date.now();
+    const key = `relay${channel}` as keyof RelayStatePayload;
+    if (key in this.latestRelayState) {
+      (this.latestRelayState as any)[key] = action;
+    }
+    if (this.latestTelemetry) {
+      this.latestTelemetry.relay[channel - 1] = action === 'ON' ? 1 : 0;
+      this.latestTelemetry.relay_known = true;
+    }
+    this.notifySubscribers('relay_state', this.latestRelayState);
+  }
 
   public subscribeEvents(cb: MessageCallback) {
     this.subscribers.push(cb);

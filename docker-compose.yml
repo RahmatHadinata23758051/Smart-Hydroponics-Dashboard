@@ -81,8 +81,6 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      args:
-        - VITE_API_URL=""
     image: hydro-frontend:latest
     container_name: hydro-frontend
     restart: unless-stopped

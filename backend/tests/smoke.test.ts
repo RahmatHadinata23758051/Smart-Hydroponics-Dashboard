@@ -63,13 +63,9 @@ describe('Comprehensive End-to-End Feature Verification', () => {
 
     it('GET /api/v1/telemetry/history should enforce every dashboard time preset', async () => {
       const receivedAt = new Date(Date.now() - 30_000);
-      const localTimestamp = new Date(receivedAt.getTime() - receivedAt.getTimezoneOffset() * 60_000)
-        .toISOString()
-        .slice(0, 19)
-        .replace('T', ' ');
 
       sqliteRepo.insertTelemetry({
-        timestamp: localTimestamp,
+        timestamp: receivedAt.toISOString(),
         ip: 'range-integration-test',
         air_t: 27.4,
         air_rh: 68.2,

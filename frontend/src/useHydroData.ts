@@ -2,7 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { io } from 'socket.io-client'
 import type { AlarmRecord, ChartPoint, DeviceStatus, MqttStatus, RelayState, Telemetry } from './types'
 
-const API = import.meta.env.VITE_API_URL || ''
+function getApiUrl(): string {
+  const envUrl = (import.meta.env.VITE_API_URL || '').replace(/^["']+|["']+$/g, '').trim()
+  if (envUrl && envUrl.startsWith('http')) {
+    return envUrl
+  }
+  return ''
+}
+
+const API = getApiUrl()
 const EMPTY_RELAYS: RelayState = [false, false, false, false]
 
 export type HistoryRange = '1h' | '24h' | '30d'
@@ -30,7 +38,9 @@ type HistoryRow = Partial<Telemetry> & {
 
 function parseDate(value?: string) {
   if (!value) return new Date(0)
-  return new Date(value.includes('T') ? value : value.replace(' ', 'T'))
+  if (value.endsWith('Z') || value.includes('+')) return new Date(value)
+  if (value.includes('T')) return new Date(value + 'Z')
+  return new Date(value.replace(' ', 'T') + 'Z')
 }
 
 function toChartPoint(row: HistoryRow): ChartPoint {
@@ -97,6 +107,7 @@ export function useHydroData() {
   const [historyRange, setHistoryRange] = useState<HistoryRange>('24h')
   const historyRangeRef = useRef<HistoryRange>('24h')
   const [notice, setNotice] = useState('')
+  const optimisticLockRef = useRef<number[]>([0, 0, 0, 0])
 
   useEffect(() => {
     historyRangeRef.current = historyRange
@@ -105,7 +116,16 @@ export function useHydroData() {
   const ingest = useCallback((data: Telemetry) => {
     setTelemetry(data)
     if (data.relay_known === true && Array.isArray(data.relay) && data.relay.length === 4) {
-      setRelays(data.relay.map(Boolean) as RelayState)
+      setRelays(prev => {
+        const next = [...prev] as RelayState
+        const now = Date.now()
+        for (let i = 0; i < 4; i++) {
+          if (now >= (optimisticLockRef.current[i] || 0)) {
+            next[i] = Boolean(data.relay[i])
+          }
+        }
+        return next
+      })
       setRelayKnown(true)
     }
     setHistory(items => {
@@ -191,8 +211,12 @@ export function useHydroData() {
       setLoading(false)
     })
 
-    const socket = io(API || window.location.origin, {
-      transports: ['websocket'], timeout: 3000, reconnectionDelay: 3000,
+    const socketUrl = API || (typeof window !== 'undefined' ? window.location.origin : '')
+    const socket = io(socketUrl, {
+      path: '/socket.io',
+      transports: ['websocket', 'polling'],
+      timeout: 5000,
+      reconnectionDelay: 2000,
     })
     socket.on('connect', () => { setSocketConnected(true); setBackendAvailable(true) })
     socket.on('disconnect', () => setSocketConnected(false))
@@ -203,8 +227,51 @@ export function useHydroData() {
       if (value === 'offline') setStatus(previous => previous ? { ...previous, status: 'offline' } : null)
     })
     socket.on('relay:state', (value: Record<string, string>) => {
-      setRelays([1, 2, 3, 4].map(index => value[`relay${index}`] === 'ON') as RelayState)
+      setRelays(prev => {
+        const next = [...prev] as RelayState
+        const now = Date.now()
+        for (let i = 0; i < 4; i++) {
+          if (now >= (optimisticLockRef.current[i] || 0)) {
+            next[i] = value[`relay${i + 1}`] === 'ON'
+          }
+        }
+        return next
+      })
       setRelayKnown(true)
+    })
+    socket.on('event:new', (event: { kind: string; detail: string }) => {
+      const relayNameMap: Record<string, number> = {
+        pompa_nutrisi: 0,
+        misting: 1,
+        exhaust_fan: 2,
+        lampu_grow: 3,
+      }
+      const chIndex = relayNameMap[event.detail]
+      if (chIndex !== undefined) {
+        if (event.kind === 'manual_on' || event.kind === 'relay') {
+          optimisticLockRef.current[chIndex] = 0
+          setRelays(prev => {
+            const n = [...prev] as RelayState
+            n[chIndex] = true
+            return n
+          })
+        } else if (event.kind === 'manual_off' || event.kind === 'guard_trip') {
+          optimisticLockRef.current[chIndex] = 0
+          setRelays(prev => {
+            const n = [...prev] as RelayState
+            n[chIndex] = false
+            return n
+          })
+        } else if (event.kind === 'manual_denied') {
+          optimisticLockRef.current[chIndex] = 0
+          setRelays(prev => {
+            const n = [...prev] as RelayState
+            n[chIndex] = false
+            return n
+          })
+          setNotice(`Perangkat menolak aktivasi ${event.detail} (Safety Lock aktif).`)
+        }
+      }
     })
     socket.on('alarm:new', (value: AlarmRecord) => {
       setAlarms(items => [value, ...items].slice(0, 8))
@@ -215,6 +282,17 @@ export function useHydroData() {
 
   const toggleRelay = useCallback(async (index: number) => {
     const action = relays[index] ? 'OFF' : 'ON'
+
+    // Kunci channel ini selama 3.5 detik dari penimpaan paket telemetri lama
+    optimisticLockRef.current[index] = Date.now() + 3500
+
+    setRelays(prev => {
+      const next = [...prev] as RelayState
+      next[index] = action === 'ON'
+      return next
+    })
+    setRelayKnown(true)
+
     try {
       const response = await fetch(`${API}/api/v1/relays/${index + 1}/command`, {
         method: 'POST',
@@ -222,8 +300,14 @@ export function useHydroData() {
         body: JSON.stringify({ action }),
       })
       if (!response.ok) throw new Error()
-      setNotice(`Perintah ${action} dikirim. Menunggu konfirmasi perangkat.`)
+      setNotice(`Perintah ${action} berhasil dikirim ke Relay ${index + 1}.`)
     } catch {
+      optimisticLockRef.current[index] = 0
+      setRelays(prev => {
+        const next = [...prev] as RelayState
+        next[index] = action === 'OFF'
+        return next
+      })
       setNotice('Perintah gagal dikirim. Backend atau broker MQTT tidak tersedia.')
     }
   }, [relays])
