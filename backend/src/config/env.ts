@@ -20,7 +20,7 @@ const envSchema = z.object({
   MQTT_RELAY_TOPIC: z.string().default('hidroponik/lab/relay'),
 
   // InfluxDB Settings
-  INFLUX_URL: z.string().default('http://localhost:8086'),
+  INFLUX_URL: z.string().default('http://localhost:9386'),
   INFLUX_TOKEN: z.string().default(''),
   INFLUX_ORG: z.string().default('polinela'),
   INFLUX_BUCKET: z.string().default('hydroponics'),
