@@ -2,6 +2,34 @@ version: '3.8'
 
 services:
   # ============================================================================
+  # InfluxDB v2 Time-Series Database Service (Port Host & Internal: 9386)
+  # ============================================================================
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: hydro-influxdb
+    restart: unless-stopped
+    ports:
+      - "${INFLUX_PORT:-9386}:9386"
+    environment:
+      - INFLUXD_HTTP_BIND_ADDRESS=:9386
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUX_USERNAME:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_PASSWORD:-polinela12345}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUX_ORG:-polinela}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUX_BUCKET:-hydroponics}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN:-hydro-secret-token-2026}
+    volumes:
+      - influx_data:/var/lib/influxdb2
+    networks:
+      - hydro_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9386/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ============================================================================
   # Backend API & MQTT / WebSocket Ingestion Service
   # ============================================================================
   backend:
@@ -25,15 +53,18 @@ services:
       - MQTT_CLIENT_ID=${MQTT_CLIENT_ID:-hydro-backend-service}
       - MQTT_BASE_TOPIC=${MQTT_BASE_TOPIC:-hidroponik/lab}
       - MQTT_RELAY_TOPIC=${MQTT_RELAY_TOPIC:-hidroponik/lab/relay}
-      # InfluxDB Time-Series (Port unik 9386, fallback otomatis ke SQLite jika token kosong)
-      - INFLUX_URL=${INFLUX_URL:-http://localhost:9386}
-      - INFLUX_TOKEN=${INFLUX_TOKEN:-}
+      # InfluxDB Time-Series (Terhubung ke port 9386)
+      - INFLUX_URL=${INFLUX_URL:-http://influxdb:9386}
+      - INFLUX_TOKEN=${INFLUX_TOKEN:-hydro-secret-token-2026}
       - INFLUX_ORG=${INFLUX_ORG:-polinela}
       - INFLUX_BUCKET=${INFLUX_BUCKET:-hydroponics}
       # Persistent SQLite Storage
       - SQLITE_DB_PATH=/app/data/hydro.db
     volumes:
       - hydro_data:/app/data
+    depends_on:
+      influxdb:
+        condition: service_healthy
     networks:
       - hydro_network
     healthcheck:
@@ -69,27 +100,6 @@ services:
       retries: 3
       start_period: 5s
 
-  # ============================================================================
-  # InfluxDB v2 Service (Opsional - Aktifkan jika ingin InfluxDB lokal dalam Stack)
-  # ============================================================================
-  # influxdb:
-  #   image: influxdb:2.7-alpine
-  #   container_name: hydro-influxdb
-  #   restart: unless-stopped
-  #   ports:
-  #     - "${INFLUX_PORT:-9386}:8086"
-  #   environment:
-  #     - DOCKER_INFLUXDB_INIT_MODE=setup
-  #     - DOCKER_INFLUXDB_INIT_USERNAME=admin
-  #     - DOCKER_INFLUXDB_INIT_PASSWORD=polinela12345
-  #     - DOCKER_INFLUXDB_INIT_ORG=polinela
-  #     - DOCKER_INFLUXDB_INIT_BUCKET=hydroponics
-  #     - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN:-}
-  #   volumes:
-  #     - influx_data:/var/lib/influxdb2
-  #   networks:
-  #     - hydro_network
-
 # ==============================================================================
 # Persistent Volumes & Networks
 # ==============================================================================
@@ -97,9 +107,9 @@ volumes:
   hydro_data:
     name: hydro_data
     driver: local
-  # influx_data:
-  #   name: hydro_influx_data
-  #   driver: local
+  influx_data:
+    name: hydro_influx_data
+    driver: local
 
 networks:
   hydro_network:
