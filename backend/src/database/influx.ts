@@ -122,7 +122,7 @@ class InfluxService {
       this.client = new InfluxDB({ url: env.INFLUX_URL, token: env.INFLUX_TOKEN });
       this.writeApi = this.client.getWriteApi(env.INFLUX_ORG, env.INFLUX_BUCKET, 'ns', {
         writeFailed: (error, _lines, retryAttempts) => {
-          logger.warn(`InfluxDB background write failed (attempt ${retryAttempts}):`, error.message);
+          logger.warn(`InfluxDB background write failed (attempt ${retryAttempts}): ${error.message}`);
         },
       });
       this.queryApi = this.client.getQueryApi(env.INFLUX_ORG);
