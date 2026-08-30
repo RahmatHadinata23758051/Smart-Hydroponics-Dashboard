@@ -11,6 +11,16 @@ export const RELAY_NAMES: Record<RelayChannel, string> = {
   4: 'lampu_grow',
 };
 
+function getTopicPairs(primaryTopic: string): string[] {
+  const pairs = [primaryTopic];
+  if (primaryTopic.startsWith('hidroponik/')) {
+    pairs.push(primaryTopic.replace(/^hidroponik\//, 'polinela/'));
+  } else if (primaryTopic.startsWith('polinela/')) {
+    pairs.push(primaryTopic.replace(/^polinela\//, 'hidroponik/'));
+  }
+  return Array.from(new Set(pairs));
+}
+
 export class ActuatorService {
   /**
    * Mengirim perintah ke kanal relay tertentu (1..4)
@@ -21,14 +31,18 @@ export class ActuatorService {
       return false;
     }
 
-    const topic = `${env.MQTT_RELAY_TOPIC}/${channel}`;
     const relayName = RELAY_NAMES[channel];
+    const topics = getTopicPairs(`${env.MQTT_RELAY_TOPIC}/${channel}`);
 
-    logger.info(`[ACTUATOR] Sending Relay Command -> Topic: ${topic} | Command: ${action} | Channel: ${channel} (${relayName})`);
+    logger.info(`[ACTUATOR] Sending Relay Command -> Topics: ${topics.join(', ')} | Command: ${action} | Channel: ${channel} (${relayName})`);
 
-    const success = mqttService.publish(topic, action);
+    let anySuccess = false;
+    for (const t of topics) {
+      const ok = mqttService.publish(t, action);
+      if (ok) anySuccess = true;
+    }
 
-    if (success) {
+    if (anySuccess) {
       // Catat ke log relay
       sqliteRepo.insertRelayLog({
         channel,
@@ -39,19 +53,23 @@ export class ActuatorService {
       });
     }
 
-    return success;
+    return anySuccess;
   }
 
   /**
    * Mengirim perintah ke seluruh relay sekaligus
    */
   public static sendAllRelayCommand(action: RelayAction, source: 'web' | 'mqtt_sync' = 'web'): boolean {
-    const topic = `${env.MQTT_RELAY_TOPIC}/all`;
-    logger.info(`[ACTUATOR] Sending ALL Relay Command -> Topic: ${topic} | Command: ${action}`);
+    const topics = getTopicPairs(`${env.MQTT_RELAY_TOPIC}/all`);
+    logger.info(`[ACTUATOR] Sending ALL Relay Command -> Topics: ${topics.join(', ')} | Command: ${action}`);
 
-    const success = mqttService.publish(topic, action);
+    let anySuccess = false;
+    for (const t of topics) {
+      const ok = mqttService.publish(t, action);
+      if (ok) anySuccess = true;
+    }
 
-    if (success) {
+    if (anySuccess) {
       for (let ch = 1; ch <= 4; ch++) {
         sqliteRepo.insertRelayLog({
           channel: ch as RelayChannel,
@@ -63,19 +81,23 @@ export class ActuatorService {
       }
     }
 
-    return success;
+    return anySuccess;
   }
 
   /**
    * Mengirim perintah sistem (RESET, MAINT_ON, MAINT_OFF)
    */
   public static sendSystemCommand(command: 'RESET' | 'MAINT_ON' | 'MAINT_OFF'): boolean {
-    const topic = `${env.MQTT_BASE_TOPIC}/cmd`;
-    logger.info(`[ACTUATOR] Sending System Command -> Topic: ${topic} | Command: ${command}`);
+    const topics = getTopicPairs(`${env.MQTT_BASE_TOPIC}/cmd`);
+    logger.info(`[ACTUATOR] Sending System Command -> Topics: ${topics.join(', ')} | Command: ${command}`);
 
-    const success = mqttService.publish(topic, command);
+    let anySuccess = false;
+    for (const t of topics) {
+      const ok = mqttService.publish(t, command);
+      if (ok) anySuccess = true;
+    }
 
-    if (success) {
+    if (anySuccess) {
       sqliteRepo.insertSystemEvent({
         kind: 'system_cmd',
         detail: `Sent ${command} from web dashboard`,
@@ -84,6 +106,6 @@ export class ActuatorService {
       });
     }
 
-    return success;
+    return anySuccess;
   }
 }

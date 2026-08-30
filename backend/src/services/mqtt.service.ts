@@ -14,6 +14,18 @@ import { AlarmService } from './alarm.service.js';
 
 export type MessageCallback = (channel: string, payload: any) => void;
 
+function safeJsonParse<T = any>(str: string): T | null {
+  try {
+    const trimmed = str.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+      return null;
+    }
+    return JSON.parse(trimmed) as T;
+  } catch {
+    return null;
+  }
+}
+
 class MqttService {
   private client: MqttClient | null = null;
   private isConnected: boolean = false;
@@ -47,11 +59,17 @@ class MqttService {
       this.isConnected = true;
       logger.info('✅ MQTT Broker connected successfully!');
 
-      // Subscribe ke seluruh topik hidroponik/lab/# dan relay/#
-      const topics = [
+      // Subscribe ke seluruh variasi topik (mendukung hidroponik/lab dan polinela/lab)
+      const topicSet = new Set<string>([
         `${env.MQTT_BASE_TOPIC}/#`,
         `${env.MQTT_RELAY_TOPIC}/#`,
-      ];
+        'hidroponik/lab/#',
+        'hidroponik/lab/relay/#',
+        'polinela/lab/#',
+        'polinela/lab/relay/#',
+      ]);
+
+      const topics = Array.from(topicSet);
 
       this.client?.subscribe(topics, (err) => {
         if (err) logger.error('Failed to subscribe to MQTT topics:', err);
@@ -104,110 +122,118 @@ class MqttService {
   }
 
   private handleIncomingMessage(topic: string, msgStr: string) {
-    logger.debug(`[MQTT RX] Topic: ${topic} | Msg: ${msgStr}`);
+    const raw = msgStr.trim();
+    logger.debug(`[MQTT RX] Topic: ${topic} | Msg: ${raw}`);
 
     try {
-      // 1. Telemetri Agregat Utama
-      if (topic === `${env.MQTT_BASE_TOPIC}/telemetry`) {
-        const data: TelemetryPayload = JSON.parse(msgStr);
-        data.relay_known = true;
-        this.latestTelemetry = data;
-        this.relayStateReceived = true;
+      // -----------------------------------------------------------------------
+      // 1. Telemetri Agregat Utama (misal: hidroponik/lab/telemetry atau polinela/lab/telemetry)
+      // -----------------------------------------------------------------------
+      if (topic.endsWith('/telemetry')) {
+        const data = safeJsonParse<TelemetryPayload>(raw);
+        if (data) {
+          data.relay_known = true;
+          this.latestTelemetry = data;
+          this.relayStateReceived = true;
 
-        if (Array.isArray(data.relay) && data.relay.length === 4) {
-          this.latestRelayState = {
-            relay1: data.relay[0] ? 'ON' : 'OFF',
-            relay2: data.relay[1] ? 'ON' : 'OFF',
-            relay3: data.relay[2] ? 'ON' : 'OFF',
-            relay4: data.relay[3] ? 'ON' : 'OFF',
-          };
+          if (Array.isArray(data.relay) && data.relay.length === 4) {
+            this.latestRelayState = {
+              relay1: data.relay[0] ? 'ON' : 'OFF',
+              relay2: data.relay[1] ? 'ON' : 'OFF',
+              relay3: data.relay[2] ? 'ON' : 'OFF',
+              relay4: data.relay[3] ? 'ON' : 'OFF',
+            };
+          }
+
+          influxService.writeTelemetry(data);
+          this.notifySubscribers('telemetry', data);
+        }
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // 2. Parser Topik Sensor Individual (sensor1 - sensor6)
+      // -----------------------------------------------------------------------
+      if (topic.endsWith('/sensor1') || topic.endsWith('/sensor2')) {
+        const data = safeJsonParse<any>(raw);
+        if (data) {
+          const tele = this.ensureLatestTelemetry();
+          if (data.temp !== undefined) tele.air_t = Number(data.temp);
+          if (data.hum !== undefined) tele.air_rh = Number(data.hum);
+          tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          influxService.writeTelemetry(tele);
+          this.notifySubscribers('telemetry', tele);
+        }
+        return;
+      }
+
+      if (topic.endsWith('/sensor3')) {
+        const data = safeJsonParse<any>(raw);
+        if (data) {
+          const tele = this.ensureLatestTelemetry();
+          if (data.tempair !== undefined) tele.water_t = Number(data.tempair);
+          if (data.ec !== undefined) tele.ec = Number(data.ec);
+          if (data.tds !== undefined) tele.tds = Number(data.tds);
+          tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          influxService.writeTelemetry(tele);
+          this.notifySubscribers('telemetry', tele);
+        }
+        return;
+      }
+
+      if (topic.endsWith('/sensor4')) {
+        const data = safeJsonParse<any>(raw);
+        if (data) {
+          const tele = this.ensureLatestTelemetry();
+          if (data.suhu !== undefined) tele.water_t = Number(data.suhu);
+          if (data.ph !== undefined) tele.ph = Number(data.ph);
+          tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          influxService.writeTelemetry(tele);
+          this.notifySubscribers('telemetry', tele);
+        }
+        return;
+      }
+
+      if (topic.endsWith('/sensor5')) {
+        // Sensor Hujan (rain detector)
+        const data = safeJsonParse<any>(raw);
+        logger.debug('[MQTT RX] Sensor5 (Rain):', data);
+        return;
+      }
+
+      if (topic.endsWith('/sensor6')) {
+        const data = safeJsonParse<any>(raw);
+        if (data) {
+          const tele = this.ensureLatestTelemetry();
+          if (data.jarak !== undefined) tele.dist_mm = Number(data.jarak);
+          if (data.level !== undefined) tele.level_pct = Number(data.level);
+          tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+          influxService.writeTelemetry(tele);
+          this.notifySubscribers('telemetry', tele);
+        }
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // 3. Relay Individual Channel State: .../relay/1/state s.d. .../relay/4/state
+      // -----------------------------------------------------------------------
+      const relayChannelMatch = topic.match(/\/relay\/([1-4])\/state$/);
+      if (relayChannelMatch) {
+        const ch = relayChannelMatch[1];
+        let state: 'ON' | 'OFF' = 'OFF';
+        const json = safeJsonParse<any>(raw);
+        if (json && typeof json === 'object') {
+          state = (json.state || json.action || 'OFF').toString().trim().toUpperCase() === 'ON' ? 'ON' : 'OFF';
+        } else {
+          state = raw.toUpperCase() === 'ON' ? 'ON' : 'OFF';
         }
 
-        influxService.writeTelemetry(data);
-        this.notifySubscribers('telemetry', data);
-      }
-
-      // 2. Parser Tambahan untuk Topik Sensor Individual (sensor1 - sensor6)
-      else if (topic === `${env.MQTT_BASE_TOPIC}/sensor1` || topic === `${env.MQTT_BASE_TOPIC}/sensor2`) {
-        const data = JSON.parse(msgStr);
-        const tele = this.ensureLatestTelemetry();
-        if (data.temp !== undefined) tele.air_t = data.temp;
-        if (data.hum !== undefined) tele.air_rh = data.hum;
-        tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-        influxService.writeTelemetry(tele);
-        this.notifySubscribers('telemetry', tele);
-      }
-
-      else if (topic === `${env.MQTT_BASE_TOPIC}/sensor3`) {
-        const data = JSON.parse(msgStr);
-        const tele = this.ensureLatestTelemetry();
-        if (data.tempair !== undefined) tele.water_t = data.tempair;
-        if (data.ec !== undefined) tele.ec = data.ec;
-        if (data.tds !== undefined) tele.tds = data.tds;
-        tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-        influxService.writeTelemetry(tele);
-        this.notifySubscribers('telemetry', tele);
-      }
-
-      else if (topic === `${env.MQTT_BASE_TOPIC}/sensor4`) {
-        const data = JSON.parse(msgStr);
-        const tele = this.ensureLatestTelemetry();
-        if (data.suhu !== undefined) tele.water_t = data.suhu;
-        if (data.ph !== undefined) tele.ph = data.ph;
-        tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-        influxService.writeTelemetry(tele);
-        this.notifySubscribers('telemetry', tele);
-      }
-
-      else if (topic === `${env.MQTT_BASE_TOPIC}/sensor6`) {
-        const data = JSON.parse(msgStr);
-        const tele = this.ensureLatestTelemetry();
-        if (data.jarak !== undefined) tele.dist_mm = data.jarak;
-        if (data.level !== undefined) tele.level_pct = data.level;
-        tele.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-        influxService.writeTelemetry(tele);
-        this.notifySubscribers('telemetry', tele);
-      }
-
-      // 3. Heartbeat & Diagnostics
-      else if (topic === `${env.MQTT_BASE_TOPIC}/status`) {
-        const data: DeviceStatusPayload = JSON.parse(msgStr);
-        this.latestDeviceStatus = data;
-        influxService.writeHeartbeat(data);
-        this.notifySubscribers('status', data);
-      }
-
-      // 4. Relay States
-      else if (topic === `${env.MQTT_RELAY_TOPIC}/state`) {
-        const data = JSON.parse(msgStr);
-        this.relayStateReceived = true;
-        this.latestRelayState = {
-          relay1: data.relay1 || this.latestRelayState.relay1,
-          relay2: data.relay2 || this.latestRelayState.relay2,
-          relay3: data.relay3 || this.latestRelayState.relay3,
-          relay4: data.relay4 || this.latestRelayState.relay4,
-          rssi: data.rssi,
-        };
-        if (this.latestTelemetry) {
-          this.latestTelemetry.relay = [
-            this.latestRelayState.relay1 === 'ON' ? 1 : 0,
-            this.latestRelayState.relay2 === 'ON' ? 1 : 0,
-            this.latestRelayState.relay3 === 'ON' ? 1 : 0,
-            this.latestRelayState.relay4 === 'ON' ? 1 : 0,
-          ];
-          this.latestTelemetry.relay_known = true;
-        }
-        this.notifySubscribers('relay_state', this.latestRelayState);
-      }
-
-      else if (topic.startsWith(`${env.MQTT_RELAY_TOPIC}/`) && topic.endsWith('/state')) {
-        const ch = topic.split('/')[3];
-        const state = msgStr.trim().toUpperCase() as 'ON' | 'OFF';
         this.relayStateReceived = true;
         if (ch === '1') this.latestRelayState.relay1 = state;
         if (ch === '2') this.latestRelayState.relay2 = state;
         if (ch === '3') this.latestRelayState.relay3 = state;
         if (ch === '4') this.latestRelayState.relay4 = state;
+
         if (this.latestTelemetry) {
           this.latestTelemetry.relay = [
             this.latestRelayState.relay1 === 'ON' ? 1 : 0,
@@ -217,37 +243,106 @@ class MqttService {
           ];
           this.latestTelemetry.relay_known = true;
         }
+
         this.notifySubscribers('relay_state', this.latestRelayState);
+        return;
       }
 
-      else if (topic === `${env.MQTT_RELAY_TOPIC}/status`) {
-        const status = msgStr.trim();
-        logger.info(`[MQTT] Controller LWT Status: ${status}`);
-        if (this.latestDeviceStatus) {
-          this.latestDeviceStatus.status = status === 'online' ? 'online' : 'offline';
+      // -----------------------------------------------------------------------
+      // 4. Relay Aggregate State: .../relay/state
+      // -----------------------------------------------------------------------
+      if (topic.endsWith('/relay/state')) {
+        const data = safeJsonParse<any>(raw);
+        if (data && typeof data === 'object') {
+          this.relayStateReceived = true;
+          this.latestRelayState = {
+            relay1: data.relay1 || this.latestRelayState.relay1,
+            relay2: data.relay2 || this.latestRelayState.relay2,
+            relay3: data.relay3 || this.latestRelayState.relay3,
+            relay4: data.relay4 || this.latestRelayState.relay4,
+            rssi: data.rssi !== undefined ? Number(data.rssi) : this.latestRelayState.rssi,
+          };
+
+          if (this.latestTelemetry) {
+            this.latestTelemetry.relay = [
+              this.latestRelayState.relay1 === 'ON' ? 1 : 0,
+              this.latestRelayState.relay2 === 'ON' ? 1 : 0,
+              this.latestRelayState.relay3 === 'ON' ? 1 : 0,
+              this.latestRelayState.relay4 === 'ON' ? 1 : 0,
+            ];
+            this.latestTelemetry.relay_known = true;
+          }
+
+          this.notifySubscribers('relay_state', this.latestRelayState);
         }
-        this.notifySubscribers('device_lwt', { status });
+        return;
       }
 
-      // 5. Alarms & Events
-      else if (topic === `${env.MQTT_BASE_TOPIC}/alarm`) {
-        const data: AlarmPayload = JSON.parse(msgStr);
-        const record = AlarmService.processAlarm(data);
-        this.notifySubscribers('alarm', record);
+      // -----------------------------------------------------------------------
+      // 5. Status / LWT (Heartbeat & Controller LWT)
+      // -----------------------------------------------------------------------
+      if (topic.endsWith('/status')) {
+        // Cek jika status adalah plain text LWT (misal: "offline" atau "online")
+        const lower = raw.toLowerCase();
+        if (lower === 'offline' || lower === 'online') {
+          logger.info(`[MQTT] Controller LWT Status -> ${lower} (Topic: ${topic})`);
+          if (this.latestDeviceStatus) {
+            this.latestDeviceStatus.status = lower as 'online' | 'offline';
+          } else {
+            this.latestDeviceStatus = {
+              status: lower as 'online' | 'offline',
+              ip: '0.0.0.0',
+              uptime_s: 0,
+              rssi: 0,
+              heap: 0,
+              bus_tx: 0,
+              bus_err: 0,
+              bus_err_pct: 0,
+              maint: 0,
+            };
+          }
+          this.notifySubscribers('device_lwt', { status: lower });
+          this.notifySubscribers('status', this.latestDeviceStatus);
+          return;
+        }
+
+        // Cek jika status adalah JSON object (Heartbeat payload)
+        const data = safeJsonParse<DeviceStatusPayload>(raw);
+        if (data && typeof data === 'object') {
+          this.latestDeviceStatus = data;
+          influxService.writeHeartbeat(data);
+          this.notifySubscribers('status', data);
+        }
+        return;
       }
 
-      else if (topic === `${env.MQTT_BASE_TOPIC}/event`) {
-        const data: EventPayload = JSON.parse(msgStr);
-        sqliteRepo.insertSystemEvent({
-          kind: data.kind,
-          detail: data.detail,
-          is_buffered: !!data.buffered,
-          timestamp: new Date(data.ts > 1000000000000 ? data.ts : Date.now()).toISOString(),
-        });
-        this.notifySubscribers('event', data);
+      // -----------------------------------------------------------------------
+      // 6. Alarms & Events
+      // -----------------------------------------------------------------------
+      if (topic.endsWith('/alarm')) {
+        const data = safeJsonParse<AlarmPayload>(raw);
+        if (data) {
+          const record = AlarmService.processAlarm(data);
+          this.notifySubscribers('alarm', record);
+        }
+        return;
+      }
+
+      if (topic.endsWith('/event')) {
+        const data = safeJsonParse<EventPayload>(raw);
+        if (data) {
+          sqliteRepo.insertSystemEvent({
+            kind: data.kind,
+            detail: data.detail,
+            is_buffered: !!data.buffered,
+            timestamp: new Date(data.ts > 1000000000000 ? data.ts : Date.now()).toISOString(),
+          });
+          this.notifySubscribers('event', data);
+        }
+        return;
       }
     } catch (err) {
-      logger.error(`Error parsing message on topic ${topic}:`, err);
+      logger.error(`Error processing message on topic ${topic}:`, err);
     }
   }
 
