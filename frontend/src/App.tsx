@@ -211,14 +211,15 @@ function ViewportVideo({ src, poster, className, onError }: {
   )
 }
 
-function SensorChart({ definition, data, loading, range }: {
+function SensorChart({ definition, data, loading, range, liveValue }: {
   definition: SensorDefinition
   data: ChartPoint[]
   loading: boolean
   range: HistoryRange
+  liveValue?: number | null
 }) {
   const available = data.filter(point => point[definition.key] !== null && point[definition.key] !== undefined)
-  const current = available.at(-1)?.[definition.key] as number | undefined
+  const current = (available.at(-1)?.[definition.key] ?? liveValue) as number | undefined
   const gradientId = `sensor-fill-${definition.key}`
 
   return (
@@ -561,7 +562,14 @@ export default function App() {
             </div>
             <div className="charts-grid">
               {sensorDefinitions.map(definition => (
-                <SensorChart key={definition.key} definition={definition} data={history} loading={historyLoading} range={historyRange} />
+                <SensorChart
+                  key={definition.key}
+                  definition={definition}
+                  data={history}
+                  loading={historyLoading}
+                  range={historyRange}
+                  liveValue={telemetry?.[definition.key]}
+                />
               ))}
             </div>
           </div>

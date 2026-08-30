@@ -52,6 +52,9 @@ export class ActuatorService {
     const ok = mqttService.publish(cmdTopic, cmdPayload);
 
     if (ok) {
+      // Perbarui relay state seketika dan broadcast via WebSocket (0ms lag)
+      mqttService.updateRelayState(channel, action);
+
       sqliteRepo.insertRelayLog({
         channel,
         relay_name: relayName,
@@ -80,6 +83,7 @@ export class ActuatorService {
       const ok = mqttService.publish(cmdTopic, 'auto');
       if (ok) {
         for (let ch = 1; ch <= 4; ch++) {
+          mqttService.updateRelayState(ch as RelayChannel, 'OFF');
           sqliteRepo.insertRelayLog({
             channel: ch as RelayChannel,
             relay_name: RELAY_NAMES[ch as RelayChannel],
@@ -100,6 +104,7 @@ export class ActuatorService {
       const ok = mqttService.publish(cmdTopic, cmdPayload);
       if (ok) {
         anySuccess = true;
+        mqttService.updateRelayState(ch as RelayChannel, 'ON');
         sqliteRepo.insertRelayLog({
           channel: ch as RelayChannel,
           relay_name: RELAY_NAMES[ch as RelayChannel],

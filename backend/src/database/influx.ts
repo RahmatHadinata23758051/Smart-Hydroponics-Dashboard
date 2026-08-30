@@ -31,9 +31,11 @@ function durationToMs(value: string, fallback: number) {
   return Number(match[1]) * DURATION_UNITS[match[2]];
 }
 
-function toLocalSqliteTimestamp(date: Date) {
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 19).replace('T', ' ');
+function parseDbTimestamp(ts: string): number {
+  if (!ts) return NaN;
+  if (ts.endsWith('Z') || ts.includes('+')) return new Date(ts).getTime();
+  if (ts.includes('T')) return new Date(ts + 'Z').getTime();
+  return new Date(ts.replace(' ', 'T') + 'Z').getTime();
 }
 
 function querySqliteTelemetry(range: string, interval: string) {
@@ -41,9 +43,10 @@ function querySqliteTelemetry(range: string, interval: string) {
   const intervalMs = Math.max(durationToMs(interval, 5 * 60_000), 1000);
   const now = new Date();
   const from = new Date(now.getTime() - rangeMs);
+
   const rows = sqliteRepo.getTelemetryRange(
-    toLocalSqliteTimestamp(from),
-    toLocalSqliteTimestamp(now),
+    from.toISOString(),
+    now.toISOString(),
   ) as SqliteTelemetryRow[];
 
   const buckets = new Map<number, {
@@ -54,14 +57,14 @@ function querySqliteTelemetry(range: string, interval: string) {
   }>();
 
   for (const row of rows) {
-    const time = new Date(row.timestamp.replace(' ', 'T')).getTime();
+    const time = parseDbTimestamp(row.timestamp);
     if (!Number.isFinite(time)) continue;
     const bucketTime = Math.floor(time / intervalMs) * intervalMs;
     let bucket = buckets.get(bucketTime);
 
     if (!bucket) {
       bucket = {
-        timestamp: toLocalSqliteTimestamp(new Date(bucketTime)),
+        timestamp: new Date(bucketTime).toISOString(),
         ip: row.ip,
         relays: [row.relay1, row.relay2, row.relay3, row.relay4],
         totals: Object.fromEntries(
@@ -85,16 +88,16 @@ function querySqliteTelemetry(range: string, interval: string) {
     .sort(([left], [right]) => left - right)
     .slice(-720)
     .map(([, bucket]) => ({
-    timestamp: bucket.timestamp,
-    ip: bucket.ip,
-    ...Object.fromEntries(TELEMETRY_FIELDS.map(field => {
-      const value = bucket.totals[field];
-      return [field, value.count ? value.sum / value.count : null];
-    })),
-    relay1: bucket.relays[0],
-    relay2: bucket.relays[1],
-    relay3: bucket.relays[2],
-    relay4: bucket.relays[3],
+      timestamp: bucket.timestamp,
+      ip: bucket.ip,
+      ...Object.fromEntries(TELEMETRY_FIELDS.map(field => {
+        const value = bucket.totals[field];
+        return [field, value.count ? value.sum / value.count : null];
+      })),
+      relay1: bucket.relays[0],
+      relay2: bucket.relays[1],
+      relay3: bucket.relays[2],
+      relay4: bucket.relays[3],
     }));
 }
 
@@ -139,28 +142,32 @@ class InfluxService {
       logger.error('Error inserting telemetry to SQLite:', err);
     }
 
-    // 2. Jika InfluxDB aktif, tulis point time-series
+    // 2. Jika InfluxDB aktif, tulis point time-series sebagai Database Utama
     if (!this.isEnabled || !this.writeApi) return;
 
     try {
+      const pointTime = t.timestamp ? new Date(t.timestamp) : new Date();
       const point = new Point('hydro_telemetry')
+        .timestamp(Number.isFinite(pointTime.getTime()) ? pointTime : new Date())
         .tag('device_id', 'hydro-s3-01')
         .tag('ip', t.ip || '0.0.0.0');
 
-      if (t.air_t !== null) point.floatField('air_t', t.air_t);
-      if (t.air_rh !== null) point.floatField('air_rh', t.air_rh);
-      if (t.lux !== null) point.floatField('lux', t.lux);
-      if (t.ec !== null) point.floatField('ec', t.ec);
-      if (t.tds !== null) point.floatField('tds', t.tds);
-      if (t.ph !== null) point.floatField('ph', t.ph);
-      if (t.water_t !== null) point.floatField('water_t', t.water_t);
-      if (t.dist_mm !== null) point.floatField('dist_mm', t.dist_mm);
-      if (t.level_pct !== null) point.floatField('level_pct', t.level_pct);
+      if (t.air_t !== null && t.air_t !== undefined) point.floatField('air_t', t.air_t);
+      if (t.air_rh !== null && t.air_rh !== undefined) point.floatField('air_rh', t.air_rh);
+      if (t.lux !== null && t.lux !== undefined) point.floatField('lux', t.lux);
+      if (t.ec !== null && t.ec !== undefined) point.floatField('ec', t.ec);
+      if (t.tds !== null && t.tds !== undefined) point.floatField('tds', t.tds);
+      if (t.ph !== null && t.ph !== undefined) point.floatField('ph', t.ph);
+      if (t.water_t !== null && t.water_t !== undefined) point.floatField('water_t', t.water_t);
+      if (t.dist_mm !== null && t.dist_mm !== undefined) point.floatField('dist_mm', t.dist_mm);
+      if (t.level_pct !== null && t.level_pct !== undefined) point.floatField('level_pct', t.level_pct);
 
-      point.intField('relay_pump', t.relay[0]);
-      point.intField('relay_mist', t.relay[1]);
-      point.intField('relay_fan', t.relay[2]);
-      point.intField('relay_light', t.relay[3]);
+      if (Array.isArray(t.relay) && t.relay.length === 4) {
+        point.intField('relay_pump', t.relay[0] ? 1 : 0);
+        point.intField('relay_mist', t.relay[1] ? 1 : 0);
+        point.intField('relay_fan', t.relay[2] ? 1 : 0);
+        point.intField('relay_light', t.relay[3] ? 1 : 0);
+      }
 
       this.writeApi.writePoint(point);
       this.writeApi.flush().catch((err) => {
@@ -176,6 +183,7 @@ class InfluxService {
 
     try {
       const point = new Point('hydro_heartbeat')
+        .timestamp(new Date())
         .tag('device_id', 'hydro-s3-01')
         .tag('status', hb.status)
         .intField('uptime_s', hb.uptime_s)
@@ -205,7 +213,8 @@ class InfluxService {
         |> range(start: ${range})
         |> filter(fn: (r) => r["_measurement"] == "hydro_telemetry")
         |> aggregateWindow(every: ${interval}, fn: mean, createEmpty: false)
-        |> yield(name: "mean")
+        |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+        |> sort(columns: ["_time"])
     `;
 
     try {
@@ -213,7 +222,23 @@ class InfluxService {
       await new Promise<void>((resolve, reject) => {
         this.queryApi!.queryRows(fluxQuery, {
           next(row, tableMetadata) {
-            rows.push(tableMetadata.toObject(row));
+            const obj = tableMetadata.toObject(row);
+            rows.push({
+              timestamp: obj._time,
+              air_t: obj.air_t ?? null,
+              air_rh: obj.air_rh ?? null,
+              lux: obj.lux ?? null,
+              ec: obj.ec ?? null,
+              tds: obj.tds ?? null,
+              ph: obj.ph ?? null,
+              water_t: obj.water_t ?? null,
+              dist_mm: obj.dist_mm ?? null,
+              level_pct: obj.level_pct ?? null,
+              relay1: obj.relay_pump ? 1 : 0,
+              relay2: obj.relay_mist ? 1 : 0,
+              relay3: obj.relay_fan ? 1 : 0,
+              relay4: obj.relay_light ? 1 : 0,
+            });
           },
           error(error) {
             reject(error);
@@ -223,7 +248,14 @@ class InfluxService {
           },
         });
       });
-      return rows;
+
+      // Jika InfluxDB berhasil mengembalikan data, langsung gunakan data InfluxDB
+      if (rows.length > 0) {
+        return rows;
+      }
+
+      // Fallback ke SQLite jika InfluxDB baru saja di-deploy dan belum punya histori lama
+      return querySqliteTelemetry(range, interval);
     } catch (err) {
       logger.error('Influx query error, falling back to SQLite:', err);
       return querySqliteTelemetry(range, interval);
