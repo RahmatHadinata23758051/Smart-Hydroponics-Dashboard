@@ -45,3 +45,9 @@ export interface MqttStatus {
   broker: string
   client_id: string
 }
+
+export interface AuthUser {
+  username: string
+  role: 'admin'
+  displayName: string
+}

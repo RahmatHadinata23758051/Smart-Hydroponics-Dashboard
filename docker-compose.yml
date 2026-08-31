@@ -60,6 +60,10 @@ services:
       - INFLUX_BUCKET=${INFLUX_BUCKET:-hydroponics}
       # Persistent SQLite Storage
       - SQLITE_DB_PATH=/app/data/hydro.db
+      # Authentication Settings
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-polinela-hydro-2026}
+      - AUTH_SECRET=${AUTH_SECRET:-hydro-jwt-super-secret-key-2026}
     volumes:
       - hydro_data:/app/data
     depends_on:

@@ -4,8 +4,11 @@ import { app } from '../src/app.js';
 import { db, initSQLiteSchema, sqliteRepo } from '../src/database/sqlite.js';
 import { mqttService } from '../src/services/mqtt.service.js';
 import { ActuatorService } from '../src/services/actuator.service.js';
+import { authService } from '../src/services/auth.service.js';
 
 describe('Comprehensive End-to-End Feature Verification', () => {
+  const token = authService.generateToken({ username: 'admin', role: 'admin', displayName: 'Admin' });
+
   beforeAll(() => {
     initSQLiteSchema();
   });
@@ -153,6 +156,7 @@ describe('Comprehensive End-to-End Feature Verification', () => {
 
       const res = await request(app)
         .post('/api/v1/relays/1/command')
+        .set('Authorization', `Bearer ${token}`)
         .send({ action: 'ON' });
 
       expect(res.status).toBe(200);
@@ -173,6 +177,7 @@ describe('Comprehensive End-to-End Feature Verification', () => {
 
       const res = await request(app)
         .post('/api/v1/relays/all/command')
+        .set('Authorization', `Bearer ${token}`)
         .send({ action: 'OFF' });
 
       expect(res.status).toBe(200);
@@ -185,14 +190,23 @@ describe('Comprehensive End-to-End Feature Verification', () => {
       const originalPublish = mqttService.publish;
       mqttService.publish = () => true;
 
-      const res1 = await request(app).post('/api/v1/system/command').send({ command: 'RESET' });
+      const res1 = await request(app)
+        .post('/api/v1/system/command')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ command: 'RESET' });
       expect(res1.status).toBe(200);
       expect(res1.body.success).toBe(true);
 
-      const res2 = await request(app).post('/api/v1/system/command').send({ command: 'MAINT_ON' });
+      const res2 = await request(app)
+        .post('/api/v1/system/command')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ command: 'MAINT_ON' });
       expect(res2.status).toBe(200);
 
-      const res3 = await request(app).post('/api/v1/system/command').send({ command: 'MAINT_OFF' });
+      const res3 = await request(app)
+        .post('/api/v1/system/command')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ command: 'MAINT_OFF' });
       expect(res3.status).toBe(200);
 
       mqttService.publish = originalPublish;

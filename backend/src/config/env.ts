@@ -31,6 +31,11 @@ const envSchema = z.object({
 
   // SQLite Settings
   SQLITE_DB_PATH: z.string().default('./data/hydro.db'),
+
+  // Authentication Settings
+  ADMIN_USERNAME: z.string().default('admin'),
+  ADMIN_PASSWORD: z.string().default('polinela-hydro-2026'),
+  AUTH_SECRET: z.string().default('hydro-jwt-super-secret-key-2026'),
 });
 
 const parsed = envSchema.safeParse(process.env);

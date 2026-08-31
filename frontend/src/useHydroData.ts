@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { io } from 'socket.io-client'
-import type { AlarmRecord, ChartPoint, DeviceStatus, MqttStatus, RelayState, Telemetry } from './types'
+import type { AlarmRecord, AuthUser, ChartPoint, DeviceStatus, MqttStatus, RelayState, Telemetry } from './types'
 
 function getApiUrl(): string {
   const envUrl = (import.meta.env.VITE_API_URL || '').replace(/^["']+|["']+$/g, '').trim()
@@ -36,46 +36,55 @@ type HistoryRow = Partial<Telemetry> & {
   relay4?: number
 }
 
-function parseDate(value?: string) {
-  if (!value) return new Date(0)
-  if (value.endsWith('Z') || value.includes('+')) return new Date(value)
-  if (value.includes('T')) return new Date(value + 'Z')
-  return new Date(value.replace(' ', 'T') + 'Z')
+function parseDate(input?: string): Date {
+  if (!input) return new Date(NaN)
+  if (input.includes('T') || input.endsWith('Z')) return new Date(input)
+  return new Date(`${input.replace(' ', 'T')}Z`)
 }
 
-function toChartPoint(row: HistoryRow): ChartPoint {
-  const timestamp = row.timestamp || row._time || ''
-  const time = parseDate(timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+function toChartPoint(item: Partial<Telemetry> & { timestamp?: string }): ChartPoint {
+  const ts = item.timestamp || new Date().toISOString()
+  const date = parseDate(ts)
+  const time = Number.isNaN(date.getTime())
+    ? '--:--'
+    : date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+
   return {
-    timestamp,
+    timestamp: ts,
     time,
-    ip: row.ip || '',
-    air_t: row.air_t ?? null,
-    air_rh: row.air_rh ?? null,
-    lux: row.lux ?? null,
-    ec: row.ec ?? null,
-    tds: row.tds ?? null,
-    ph: row.ph ?? null,
-    water_t: row.water_t ?? null,
-    dist_mm: row.dist_mm ?? null,
-    level_pct: row.level_pct ?? null,
-    relay: [row.relay1 ?? 0, row.relay2 ?? 0, row.relay3 ?? 0, row.relay4 ?? 0],
+    ip: item.ip || '0.0.0.0',
+    air_t: item.air_t ?? null,
+    air_rh: item.air_rh ?? null,
+    lux: item.lux ?? null,
+    ec: item.ec ?? null,
+    tds: item.tds ?? null,
+    ph: item.ph ?? null,
+    water_t: item.water_t ?? null,
+    dist_mm: item.dist_mm ?? null,
+    level_pct: item.level_pct ?? null,
+    relay: item.relay ?? [0, 0, 0, 0],
+    relay_known: item.relay_known ?? false,
   }
 }
 
-function normalizeHistory(rows: HistoryRow[]): ChartPoint[] {
-  if (!rows.length) return []
+function normalizeHistory(raw: unknown): ChartPoint[] {
+  if (!Array.isArray(raw)) return []
 
-  let normalized: ChartPoint[]
-  if (rows.some(row => row._field && row._time)) {
-    const points = new Map<string, HistoryRow>()
+  const rows = raw as HistoryRow[]
+  if (rows.length === 0) return []
+
+  let normalized: ChartPoint[] = []
+  if ('_field' in rows[0]) {
+    const grouped = new Map<string, Partial<Telemetry>>()
     for (const row of rows) {
       if (!row._time || !row._field) continue
-      const point = points.get(row._time) || { timestamp: row._time }
-      ;(point as Record<string, unknown>)[row._field] = row._value ?? null
-      points.set(row._time, point)
+      const bucket = grouped.get(row._time) || { timestamp: row._time }
+      if (row._value !== undefined && row._value !== null) {
+        ;(bucket as Record<string, unknown>)[row._field] = row._value
+      }
+      grouped.set(row._time, bucket)
     }
-    normalized = [...points.values()].map(toChartPoint)
+    normalized = Array.from(grouped.values()).map(toChartPoint)
   } else {
     normalized = rows.map(toChartPoint)
   }
@@ -86,13 +95,26 @@ function normalizeHistory(rows: HistoryRow[]): ChartPoint[] {
     .slice(-720)
 }
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`${API}${path}`, { signal })
+async function getJson<T>(path: string, signal?: AbortSignal, token?: string | null): Promise<T> {
+  const headers: Record<string, string> = {}
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const response = await fetch(`${API}${path}`, { signal, headers })
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
   return response.json() as Promise<T>
 }
 
 export function useHydroData() {
+  const [user, setUser] = useState<AuthUser | null>(null)
+  const [token, setToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('hydra_auth_token')
+    } catch {
+      return null
+    }
+  })
+  const [authLoading, setAuthLoading] = useState(true)
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+
   const [telemetry, setTelemetry] = useState<Telemetry | null>(null)
   const [status, setStatus] = useState<DeviceStatus | null>(null)
   const [mqtt, setMqtt] = useState<MqttStatus | null>(null)
@@ -276,6 +298,94 @@ export function useHydroData() {
     return () => { active = false; socket.disconnect() }
   }, [ingest])
 
+  // Verify existing token on initial load
+  useEffect(() => {
+    let active = true
+    async function verifyAuth() {
+      const savedToken = localStorage.getItem('hydra_auth_token')
+      if (!savedToken) {
+        if (active) {
+          setAuthLoading(false)
+          setIsAuthenticated(false)
+        }
+        return
+      }
+
+      try {
+        const res = await fetch(`${API}/api/v1/auth/me`, {
+          headers: { Authorization: `Bearer ${savedToken}` },
+        })
+        if (res.ok) {
+          const data = await res.json()
+          if (active) {
+            setUser(data.user)
+            setToken(savedToken)
+            setIsAuthenticated(true)
+          }
+        } else {
+          localStorage.removeItem('hydra_auth_token')
+          if (active) {
+            setToken(null)
+            setUser(null)
+            setIsAuthenticated(false)
+          }
+        }
+      } catch {
+        if (active) {
+          setToken(savedToken)
+          setIsAuthenticated(true)
+        }
+      } finally {
+        if (active) setAuthLoading(false)
+      }
+    }
+
+    verifyAuth()
+    return () => { active = false }
+  }, [])
+
+  const login = useCallback(async (username: string, password: string): Promise<boolean> => {
+    try {
+      const response = await fetch(`${API}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+      const data = await response.json()
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Username atau kata sandi salah.')
+      }
+
+      localStorage.setItem('hydra_auth_token', data.token)
+      setToken(data.token)
+      setUser(data.user)
+      setIsAuthenticated(true)
+      setNotice(`Selamat datang, ${data.user.displayName || data.user.username}!`)
+      return true
+    } catch (err: any) {
+      throw new Error(err.message || 'Gagal terhubung ke backend server.')
+    }
+  }, [])
+
+  const logout = useCallback(async () => {
+    try {
+      if (token) {
+        await fetch(`${API}/api/v1/auth/logout`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      }
+    } catch {
+      // Ignore network errors on logout
+    } finally {
+      localStorage.removeItem('hydra_auth_token')
+      setToken(null)
+      setUser(null)
+      setIsAuthenticated(false)
+      setNotice('Anda telah keluar dari sistem.')
+    }
+  }, [token])
+
   const toggleRelay = useCallback(async (index: number) => {
     const action = relays[index] ? 'OFF' : 'ON'
 
@@ -290,9 +400,12 @@ export function useHydroData() {
     setRelayKnown(true)
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+
       const response = await fetch(`${API}/api/v1/relays/${index + 1}/command`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ action }),
       })
       if (!response.ok) throw new Error()
@@ -306,7 +419,7 @@ export function useHydroData() {
       })
       setNotice('Perintah gagal dikirim. Backend atau broker MQTT tidak tersedia.')
     }
-  }, [relays])
+  }, [relays, token])
 
   useEffect(() => {
     if (!notice) return
@@ -315,6 +428,7 @@ export function useHydroData() {
   }, [notice])
 
   return {
+    user, token, authLoading, isAuthenticated, login, logout,
     telemetry, status, mqtt, history, alarms, relays, relayKnown, socketConnected,
     backendAvailable, loading, historyLoading, historyRange, setHistoryRange,
     toggleRelay, notice,
