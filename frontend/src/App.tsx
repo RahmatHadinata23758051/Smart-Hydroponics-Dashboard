@@ -4,13 +4,14 @@ import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import {
   Activity, AgricultureAnalytics, ChartLine, CheckmarkFilled, Chip, ConnectionSignal,
-  Dashboard, DataBase, Humidity, Light, Meter, Notification, Power, Radio, RainDrop,
-  Temperature, TemperatureWater, WarningAltFilled, Wifi, Windy,
+  Dashboard, DataBase, Humidity, Light, Logout, Meter, Notification, Power, Radio, RainDrop,
+  Temperature, TemperatureWater, User, WarningAltFilled, Wifi, Windy,
 } from '@carbon/icons-react'
 import {
   Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import greenhouseImage from './assets/hydroponic-greenhouse.webp'
+import { LoginPage } from './components/LoginPage'
 import { useHydroData } from './useHydroData'
 import type { HistoryRange } from './useHydroData'
 import type { ChartPoint } from './types'
@@ -361,17 +362,20 @@ function RelayControl({ relays, toggle, enabled, known }: {
   )
 }
 
-export default function App() {
+function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
   const pageRef = useRef<HTMLDivElement>(null)
   const [activeSection, setActiveSection] = useState('ringkasan')
   const [heroVideoFailed, setHeroVideoFailed] = useState(false)
   const [sensorVideoFailed, setSensorVideoFailed] = useState(false)
   const [operationsVideoFailed, setOperationsVideoFailed] = useState(false)
+
   const {
+    user, logout,
     telemetry, status, mqtt, history, alarms, relays, relayKnown, socketConnected,
     backendAvailable, loading, historyLoading, historyRange, setHistoryRange,
     toggleRelay, notice,
-  } = useHydroData()
+  } = data
+
   const heroVideoUrl = (import.meta.env.VITE_HERO_VIDEO_URL as string | undefined)?.trim() || '/media/green_house.mp4'
   const sensorVideoUrl = (import.meta.env.VITE_SENSOR_VIDEO_URL as string | undefined)?.trim() || '/media/sensor.mp4'
   const operationsVideoUrl = (import.meta.env.VITE_OPERATIONS_VIDEO_URL as string | undefined)?.trim() || '/media/greenhouse_hydro.mp4'
@@ -440,7 +444,6 @@ export default function App() {
         pin: '.trend-intro',
         pinSpacing: false,
       })
-
     })
     return () => mm.revert()
   }, { scope: pageRef })
@@ -471,6 +474,21 @@ export default function App() {
           <div className="top-status">
             <span className={`device-status ${deviceOnline ? 'online' : ''}`}><i />{deviceOnline ? 'Perangkat online' : 'Perangkat offline'}</span>
             <span className={`stream-status ${socketConnected ? 'live' : ''}`}><ConnectionSignal size={18} />{socketConnected ? 'LIVE' : 'REST'}</span>
+            <div className="user-profile-dock">
+              <span className="user-badge" title={`Login sebagai ${user?.username || 'Admin'}`}>
+                <User size={15} />
+                <strong>{user?.username || 'Admin'}</strong>
+              </span>
+              <button
+                type="button"
+                className="logout-action-btn"
+                onClick={logout}
+                title="Keluar dari sesi"
+              >
+                <Logout size={15} />
+                <span>Keluar</span>
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -605,12 +623,12 @@ export default function App() {
             <article className="diagnostic-panel">
               <div className="panel-heading"><div><span>Device health</span><h3>Diagnostik perangkat</h3></div><Dashboard size={24} /></div>
               <div className="diagnostic-grid">
-                <div><Wifi size={20} /><span>WiFi RSSI</span><strong>{status ? `${status.rssi} dBm` : 'N/A'}</strong></div>
-                <div><ConnectionSignal size={20} /><span>Bus error</span><strong>{status ? `${status.bus_err_pct.toFixed(2)}%` : 'N/A'}</strong></div>
+                <div><Wifi size={20} /><span>WiFi RSSI</span><strong>{status?.rssi !== undefined && status?.rssi !== null ? `${status.rssi} dBm` : 'N/A'}</strong></div>
+                <div><ConnectionSignal size={20} /><span>Bus error</span><strong>{status?.bus_err_pct !== undefined && status?.bus_err_pct !== null ? `${status.bus_err_pct.toFixed(2)}%` : 'N/A'}</strong></div>
                 <div><Activity size={20} /><span>Uptime</span><strong>{formatUptime(status?.uptime_s)}</strong></div>
-                <div><Chip size={20} /><span>Free heap</span><strong>{status ? `${Math.round(status.heap / 1024)} KB` : 'N/A'}</strong></div>
-                <div><DataBase size={20} /><span>Bus TX</span><strong>{status?.bus_tx.toLocaleString('id-ID') ?? 'N/A'}</strong></div>
-                <div><Meter size={20} /><span>Maintenance</span><strong>{status ? (status.maint ? 'Aktif' : 'Normal') : 'N/A'}</strong></div>
+                <div><Chip size={20} /><span>Free heap</span><strong>{status?.heap !== undefined && status?.heap !== null ? `${Math.round(status.heap / 1024)} KB` : 'N/A'}</strong></div>
+                <div><DataBase size={20} /><span>Bus TX</span><strong>{status?.bus_tx !== undefined && status?.bus_tx !== null ? status.bus_tx.toLocaleString('id-ID') : 'N/A'}</strong></div>
+                <div><Meter size={20} /><span>Maintenance</span><strong>{status?.maint !== undefined && status?.maint !== null ? (status.maint ? 'Aktif' : 'Normal') : 'N/A'}</strong></div>
               </div>
             </article>
 
@@ -645,4 +663,24 @@ export default function App() {
       {notice ? <div className="toast" role="status"><Power size={18} />{notice}</div> : null}
     </div>
   )
+}
+
+export default function App() {
+  const hydroData = useHydroData()
+  const { authLoading, isAuthenticated, login, backendAvailable } = hydroData
+
+  if (authLoading) {
+    return (
+      <div className="login-loading-screen">
+        <div className="spinner large" />
+        <p>Memverifikasi sesi aman Hydra...</p>
+      </div>
+    )
+  }
+
+  if (!isAuthenticated) {
+    return <LoginPage onLogin={login} backendAvailable={backendAvailable} />
+  }
+
+  return <DashboardView data={hydroData} />
 }

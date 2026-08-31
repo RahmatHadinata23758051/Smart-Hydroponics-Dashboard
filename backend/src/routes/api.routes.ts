@@ -2,8 +2,13 @@ import { Router } from 'express';
 import { telemetryController } from '../controllers/telemetry.controller.js';
 import { actuatorController } from '../controllers/actuator.controller.js';
 import { diagnosticsController } from '../controllers/diagnostics.controller.js';
+import authRoutes from './auth.routes.js';
+import { authMiddleware } from '../middleware/auth.middleware.js';
 
 const router = Router();
+
+// --- Authentication Endpoints
+router.use('/auth', authRoutes);
 
 // --- Health Check
 router.get('/health', (req, res) => {
@@ -21,9 +26,9 @@ router.get('/telemetry/export', telemetryController.exportCsv);
 
 // --- Actuator & Relay Endpoints
 router.get('/relays/state', actuatorController.getRelayStates);
-router.post('/relays/all/command', actuatorController.triggerAllRelays);
-router.post('/relays/:channel/command', actuatorController.triggerRelay);
-router.post('/system/command', actuatorController.triggerSystemCommand);
+router.post('/relays/all/command', authMiddleware, actuatorController.triggerAllRelays);
+router.post('/relays/:channel/command', authMiddleware, actuatorController.triggerRelay);
+router.post('/system/command', authMiddleware, actuatorController.triggerSystemCommand);
 
 // --- Diagnostics & Logs Endpoints
 router.get('/diagnostics/health', diagnosticsController.getDeviceHealth);

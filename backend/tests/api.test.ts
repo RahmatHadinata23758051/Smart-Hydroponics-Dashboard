@@ -2,8 +2,11 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/app.js';
 import { initSQLiteSchema } from '../src/database/sqlite.js';
+import { authService } from '../src/services/auth.service.js';
 
 describe('REST API Endpoints Tests', () => {
+  const token = authService.generateToken({ username: 'admin', role: 'admin', displayName: 'Admin' });
+
   beforeAll(() => {
     initSQLiteSchema();
   });
@@ -40,6 +43,7 @@ describe('REST API Endpoints Tests', () => {
   it('POST /api/v1/relays/99/command should return 400 for invalid channel', async () => {
     const res = await request(app)
       .post('/api/v1/relays/99/command')
+      .set('Authorization', `Bearer ${token}`)
       .send({ action: 'ON' });
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
@@ -48,6 +52,7 @@ describe('REST API Endpoints Tests', () => {
   it('POST /api/v1/system/command should return 400 for invalid command', async () => {
     const res = await request(app)
       .post('/api/v1/system/command')
+      .set('Authorization', `Bearer ${token}`)
       .send({ command: 'INVALID_CMD' });
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);

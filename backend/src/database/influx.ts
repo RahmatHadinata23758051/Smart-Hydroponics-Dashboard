@@ -185,14 +185,14 @@ class InfluxService {
       const point = new Point('hydro_heartbeat')
         .timestamp(new Date())
         .tag('device_id', 'hydro-s3-01')
-        .tag('status', hb.status)
-        .intField('uptime_s', hb.uptime_s)
-        .intField('rssi', hb.rssi)
-        .intField('heap', hb.heap)
-        .intField('bus_tx', hb.bus_tx)
-        .intField('bus_err', hb.bus_err)
-        .floatField('bus_err_pct', hb.bus_err_pct)
-        .intField('maint', hb.maint);
+        .tag('status', hb.status || 'unknown')
+        .intField('uptime_s', hb.uptime_s ?? 0)
+        .intField('rssi', hb.rssi ?? -99)
+        .intField('heap', hb.heap ?? 0)
+        .intField('bus_tx', hb.bus_tx ?? 0)
+        .intField('bus_err', hb.bus_err ?? 0)
+        .floatField('bus_err_pct', hb.bus_err_pct ?? 0)
+        .intField('maint', hb.maint ?? 0);
 
       this.writeApi.writePoint(point);
       this.writeApi.flush().catch((err) => {
