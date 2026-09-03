@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ============================================================================
   # InfluxDB v2 Time-Series Database Service (Port Host & Internal: 9386)
@@ -36,7 +34,11 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    image: hydro-backend:v3.0
+      # Portainer Git stacks must rebuild the checked-out commit, not reuse an
+      # image produced by an older stack deployment.
+      no_cache: true
+    image: hydro-backend:${HYDRO_IMAGE_VERSION:-v4.0}
+    pull_policy: build
     container_name: hydro-backend
     restart: unless-stopped
     ports:
@@ -85,7 +87,11 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    image: hydro-frontend:v3.0
+      # The frontend bundle is compiled inside the image. Disabling the build
+      # cache prevents a stale Vite dist layer from surviving a stack redeploy.
+      no_cache: true
+    image: hydro-frontend:${HYDRO_IMAGE_VERSION:-v4.0}
+    pull_policy: build
     container_name: hydro-frontend
     restart: unless-stopped
     ports:
