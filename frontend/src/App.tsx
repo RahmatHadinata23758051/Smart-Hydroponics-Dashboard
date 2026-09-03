@@ -11,6 +11,7 @@ import {
   Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import greenhouseImage from './assets/hydroponic-greenhouse.webp'
+import { GreenhouseTwin } from './components/GreenhouseTwin'
 import { LoginPage } from './components/LoginPage'
 import { useHydroData } from './useHydroData'
 import type { HistoryRange } from './useHydroData'
@@ -34,7 +35,7 @@ type SensorDefinition = {
 const navItems = [
   { label: 'Ringkasan', target: 'ringkasan' },
   { label: 'Tren sensor', target: 'tren-sensor' },
-  { label: 'Sistem air', target: 'sistem' },
+  { label: 'Digital twin', target: 'sistem' },
   { label: 'Diagnostik', target: 'diagnostik' },
 ]
 
@@ -281,46 +282,6 @@ function SensorChart({ definition, data, loading, range, liveValue }: {
         )}
       </div>
       <footer><span>{definition.ideal}</span><b>{available.length} sampel</b></footer>
-    </article>
-  )
-}
-
-function Reservoir({ level, waterTemp, distance }: {
-  level: number | null | undefined
-  waterTemp: number | null | undefined
-  distance: number | null | undefined
-}) {
-  const safeLevel = Math.min(100, Math.max(0, level ?? 0))
-  const state = level === null || level === undefined
-    ? 'Belum terbaca'
-    : level < 10 ? 'Kritis' : level < 30 ? 'Rendah' : 'Aman'
-
-  return (
-    <article className="operation-panel reservoir-panel">
-      <div className="panel-heading">
-        <div><span>Reservoir utama</span><h3>Tandon nutrisi</h3></div>
-        <RainDrop size={28} />
-      </div>
-      <div className="reservoir-content">
-        <div className="reservoir-copy">
-          <p>Level larutan dibaca langsung dari laser distance sensor. Persentase dihitung oleh perangkat sebelum dikirim ke backend.</p>
-          <div className="reservoir-stats">
-            <div><span>Status</span><strong className={state === 'Aman' ? 'safe' : ''}>{state}</strong></div>
-            <div><span>Suhu air</span><strong>{waterTemp === null || waterTemp === undefined ? 'N/A' : `${waterTemp.toFixed(1)}°C`}</strong></div>
-            <div><span>Jarak laser</span><strong>{distance === null || distance === undefined ? 'N/A' : `${distance.toFixed(0)} mm`}</strong></div>
-          </div>
-        </div>
-        <div className="reservoir-visual">
-          <div className="tank-scale"><span>100</span><span>75</span><span>50</span><span>25</span><span>0</span></div>
-          <div className="tank">
-            <div className="tank-water" style={{ height: `${safeLevel}%` }} />
-            <div className="tank-reading">
-              <strong>{level === null || level === undefined ? 'N/A' : level.toFixed(1)}</strong>
-              <span>{level === null || level === undefined ? '' : '%'}</span>
-            </div>
-          </div>
-        </div>
-      </div>
     </article>
   )
 }
@@ -605,12 +566,22 @@ function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
 
           <section className="section-block system-section" id="sistem">
           <div className="section-title">
-            <div><h2>Sistem air dan aktuator</h2><p>Panel lapangan dengan feedback langsung, disusun sebagai rangkaian kontrol yang bisa ditelusuri.</p></div>
+            <div><h2>Greenhouse dalam satu pandangan.</h2><p>Visual proses yang menghubungkan kondisi lingkungan, aliran nutrisi, dan aktuator secara langsung.</p></div>
             <span className="source-label"><Radio size={16} />Hardware feedback</span>
           </div>
           <div className="stack-sequence">
-            <Reservoir level={telemetry?.level_pct} waterTemp={telemetry?.water_t} distance={telemetry?.dist_mm} />
-            <RelayControl relays={relays} toggle={toggleRelay} enabled={backendAvailable && mqtt?.connected === true} known={relayKnown} />
+            <GreenhouseTwin
+              telemetry={telemetry}
+              relays={relays}
+              relayKnown={relayKnown}
+              deviceOnline={deviceOnline}
+            />
+            <RelayControl
+              relays={relays}
+              toggle={toggleRelay}
+              enabled={deviceOnline && backendAvailable && mqtt?.connected === true}
+              known={relayKnown && deviceOnline}
+            />
           </div>
           </section>
 
