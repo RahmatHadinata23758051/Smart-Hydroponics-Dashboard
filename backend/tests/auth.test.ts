@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/app.js';
 import { authService } from '../src/services/auth.service.js';
@@ -14,6 +14,8 @@ describe('Authentication & Authorization Suite', () => {
     const user = { username: 'admin', role: 'admin' as const, displayName: 'Administrator' };
     validToken = authService.generateToken(user);
   });
+
+  afterEach(() => vi.restoreAllMocks());
 
   describe('1. POST /api/v1/auth/login', () => {
     it('should reject login with missing fields', async () => {
@@ -67,18 +69,16 @@ describe('Authentication & Authorization Suite', () => {
       expect(res.status).toBe(401);
     });
 
-    it('should allow relay command with valid token', async () => {
-      const originalPublish = mqttService.publish;
-      mqttService.publish = () => true;
+    it('should allow relay command with valid token and live controller feedback', async () => {
+      vi.spyOn(mqttService, 'isControllerReady').mockReturnValue(true);
+      vi.spyOn(mqttService, 'publish').mockReturnValue(true);
 
       const res = await request(app)
         .post('/api/v1/relays/1/command')
         .set('Authorization', `Bearer ${validToken}`)
         .send({ action: 'ON' });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(202);
       expect(res.body.success).toBe(true);
-
-      mqttService.publish = originalPublish;
     });
   });
 });

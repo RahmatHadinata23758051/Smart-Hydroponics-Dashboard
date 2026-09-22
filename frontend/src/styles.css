@@ -694,6 +694,9 @@ a { color: inherit; text-decoration: none; }
 .relay-slice { min-width: 0; min-height: 6.3rem; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.8rem; padding: 0.9rem; background: var(--green-deep); transition: background 260ms ease, transform 220ms ease; }
 .relay-slice:hover, .relay-slice:focus-within { background: #155b30; }
 .relay-slice.on { color: var(--green-deep); background: #dff3e3; }
+.relay-slice.pending { outline: 1px solid #a8d7b3; outline-offset: -1px; }
+.relay-slice.pending .relay-state > span { color: #bce9c5; }
+.relay-slice.on.pending .relay-state > span { color: #1b7138; }
 .relay-icon { width: 2.35rem; height: 2.35rem; display: grid; place-items: center; border: 1px solid rgba(255, 255, 255, 0.2); }
 .relay-slice.on .relay-icon { border-color: rgba(14, 72, 36, 0.22); }
 .relay-copy { min-width: 0; display: grid; gap: 0.3rem; }

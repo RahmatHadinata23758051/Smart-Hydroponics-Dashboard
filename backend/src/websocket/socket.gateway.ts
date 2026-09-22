@@ -30,6 +30,7 @@ export class SocketGateway {
       if (mqttService.latestDeviceStatus) {
         socket.emit('status:live', mqttService.latestDeviceStatus);
       }
+      socket.emit('controller:ready', mqttService.isControllerReady());
       if (mqttService.relayStateReceived) {
         socket.emit('relay:state', mqttService.latestRelayState);
       }
@@ -45,9 +46,11 @@ export class SocketGateway {
       switch (channel) {
         case 'telemetry':
           this.io.emit('telemetry:live', payload);
+          this.io.emit('controller:ready', mqttService.isControllerReady());
           break;
         case 'status':
           this.io.emit('status:live', payload);
+          this.io.emit('controller:ready', mqttService.isControllerReady());
           break;
         case 'relay_state':
           this.io.emit('relay:state', payload);
@@ -57,9 +60,13 @@ export class SocketGateway {
           break;
         case 'event':
           this.io.emit('event:new', payload);
+          this.io.emit('controller:ready', mqttService.isControllerReady());
           break;
         case 'device_lwt':
           this.io.emit('device:lwt', payload);
+          break;
+        case 'controller_ready':
+          this.io.emit('controller:ready', payload);
           break;
       }
     });

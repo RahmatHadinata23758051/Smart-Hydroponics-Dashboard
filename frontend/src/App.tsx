@@ -286,8 +286,9 @@ function SensorChart({ definition, data, loading, range, liveValue }: {
   )
 }
 
-function RelayControl({ relays, toggle, enabled, known }: {
+function RelayControl({ relays, pendingRelays, toggle, enabled, known }: {
   relays: boolean[]
+  pendingRelays: Array<'ON' | 'OFF' | null>
   toggle: (index: number) => void
   enabled: boolean
   known: boolean
@@ -295,30 +296,31 @@ function RelayControl({ relays, toggle, enabled, known }: {
   return (
     <article className="actuator-dock relay-panel">
       <div className="panel-heading">
-        <div><span>Hardware feedback</span><h3>Kontrol aktuator</h3></div>
+        <div><span>Feedback firmware</span><h3>Kontrol aktuator</h3></div>
         <div className={`availability ${enabled && known ? 'available' : ''}`}><i />{!known ? 'Menunggu feedback' : enabled ? 'Siap' : 'Terkunci'}</div>
       </div>
       <div className="relay-accordion">
         {relayItems.map(({ name, note, icon: RelayIcon }, index) => (
-          <div className={`relay-slice ${known && relays[index] ? 'on' : ''}`} key={name}>
+          <div className={`relay-slice ${known && relays[index] ? 'on' : ''} ${pendingRelays[index] ? 'pending' : ''}`} key={name}>
             <div className="relay-icon"><RelayIcon size={28} /></div>
             <div className="relay-copy"><strong>{name}</strong><span>{note}</span></div>
             <div className="relay-state">
-              <span>{known ? (relays[index] ? 'ON' : 'OFF') : '--'}</span>
+              <span>{pendingRelays[index] ? `MENUNGGU ${pendingRelays[index]}` : known ? (relays[index] ? 'ON' : 'OFF') : '--'}</span>
               <button
                 type="button"
-                disabled={!enabled || !known}
+                disabled={!enabled || !known || pendingRelays[index] !== null}
                 className={`toggle ${known && relays[index] ? 'on' : ''}`}
                 onClick={() => toggle(index)}
                 role="switch"
                 aria-checked={relays[index]}
+                aria-busy={pendingRelays[index] !== null}
                 aria-label={`${relays[index] ? 'Matikan' : 'Nyalakan'} ${name}`}
               ><i /></button>
             </div>
           </div>
         ))}
       </div>
-      <p className="hardware-note"><Radio size={16} />{known ? 'Sakelar mengikuti feedback perangkat fisik.' : 'Belum ada status relay aktual dari perangkat.'}</p>
+      <p className="hardware-note"><Radio size={16} />{known ? 'Status dilaporkan firmware, bukan sensor kontak relay. Mode manual berakhir setelah 10 menit; otomatis dapat aktif kembali.' : 'Kontrol terkunci sampai feedback terbaru perangkat tersedia.'}</p>
     </article>
   )
 }
@@ -332,7 +334,7 @@ function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
 
   const {
     user, logout,
-    telemetry, status, mqtt, history, alarms, relays, relayKnown, socketConnected,
+    telemetry, status, mqtt, history, alarms, relays, relayKnown, pendingRelays, controllerReady, socketConnected,
     backendAvailable, loading, historyLoading, historyRange, setHistoryRange,
     toggleRelay, notice,
   } = data
@@ -415,6 +417,8 @@ function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
       ? { title: 'Backend tidak terjangkau', body: 'Data terakhir dipertahankan sampai koneksi pulih.', tone: 'danger' }
       : activeAlarms.length
         ? { title: `${activeAlarms.length} alarm aktif`, body: activeAlarms[0]?.description || 'Periksa kondisi perangkat.', tone: 'warning' }
+        : !deviceOnline || !controllerReady
+          ? { title: 'Feedback alat belum tersedia', body: 'Status relay belum segar; kontrol aktuator dikunci sementara.', tone: 'warning' }
         : { title: 'Sistem terpantau normal', body: 'Seluruh kanal backend berhasil diperiksa.', tone: 'success' }
 
   return (
@@ -573,14 +577,15 @@ function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
             <GreenhouseTwin
               telemetry={telemetry}
               relays={relays}
-              relayKnown={relayKnown}
-              deviceOnline={deviceOnline}
+              relayKnown={relayKnown && controllerReady}
+              deviceOnline={deviceOnline && controllerReady}
             />
             <RelayControl
               relays={relays}
+              pendingRelays={pendingRelays}
               toggle={toggleRelay}
-              enabled={deviceOnline && backendAvailable && mqtt?.connected === true}
-              known={relayKnown && deviceOnline}
+              enabled={deviceOnline && backendAvailable && mqtt?.connected === true && socketConnected && controllerReady}
+              known={relayKnown && deviceOnline && controllerReady}
             />
           </div>
           </section>
@@ -588,7 +593,7 @@ function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
           <section className="section-block diagnostics-section" id="diagnostik">
           <div className="section-title">
             <div><h2>Kesehatan perangkat</h2><p>Diagnostik ESP32, jalur RS-485, MQTT, dan alarm backend.</p></div>
-            <span className={`health-indicator ${deviceOnline ? 'online' : ''}`}><i />{deviceOnline ? 'Perangkat sehat' : 'Perlu diperiksa'}</span>
+            <span className={`health-indicator ${deviceOnline && controllerReady ? 'online' : ''}`}><i />{deviceOnline && controllerReady ? 'Perangkat sehat' : 'Perlu diperiksa'}</span>
           </div>
           <div className="diagnostics-layout">
             <article className="diagnostic-panel">

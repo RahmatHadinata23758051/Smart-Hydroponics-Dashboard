@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/app.js';
 import { db, initSQLiteSchema, sqliteRepo } from '../src/database/sqlite.js';
@@ -16,6 +16,8 @@ describe('Comprehensive End-to-End Feature Verification', () => {
   afterAll(() => {
     db.prepare('DELETE FROM telemetry_records WHERE ip = ?').run('range-integration-test');
   });
+
+  afterEach(() => vi.restoreAllMocks());
 
   describe('1. Health & Meta Endpoints', () => {
     it('GET / should return service info', async () => {
@@ -150,16 +152,15 @@ describe('Comprehensive End-to-End Feature Verification', () => {
     });
 
     it('POST /api/v1/relays/1/command should validate action and record log', async () => {
-      // Mock mqttService.publish to return true in test environment
-      const originalPublish = mqttService.publish;
-      mqttService.publish = () => true;
+      vi.spyOn(mqttService, 'isControllerReady').mockReturnValue(true);
+      vi.spyOn(mqttService, 'publish').mockReturnValue(true);
 
       const res = await request(app)
         .post('/api/v1/relays/1/command')
         .set('Authorization', `Bearer ${token}`)
         .send({ action: 'ON' });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(202);
       expect(res.body.success).toBe(true);
       expect(res.body.channel).toBe(1);
       expect(res.body.action).toBe('ON');
@@ -168,22 +169,30 @@ describe('Comprehensive End-to-End Feature Verification', () => {
       const logs = sqliteRepo.getRelayLogs(5);
       expect(logs.some((l: any) => l.channel === 1 && l.action === 'ON')).toBe(true);
 
-      mqttService.publish = originalPublish;
     });
 
     it('POST /api/v1/relays/all/command should accept valid action', async () => {
-      const originalPublish = mqttService.publish;
-      mqttService.publish = () => true;
+      vi.spyOn(mqttService, 'isControllerReady').mockReturnValue(true);
+      vi.spyOn(mqttService, 'publish').mockReturnValue(true);
 
       const res = await request(app)
         .post('/api/v1/relays/all/command')
         .set('Authorization', `Bearer ${token}`)
         .send({ action: 'OFF' });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(202);
       expect(res.body.success).toBe(true);
+    });
 
-      mqttService.publish = originalPublish;
+    it('rejects relay commands when physical feedback is unavailable', async () => {
+      vi.spyOn(mqttService, 'isControllerReady').mockReturnValue(false);
+      const publish = vi.spyOn(mqttService, 'publish').mockReturnValue(true);
+      const res = await request(app)
+        .post('/api/v1/relays/1/command')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ action: 'ON' });
+      expect(res.status).toBe(503);
+      expect(publish).not.toHaveBeenCalled();
     });
 
     it('POST /api/v1/system/command should support RESET, MAINT_ON, MAINT_OFF', async () => {

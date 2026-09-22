@@ -5,10 +5,11 @@ import { mqttService } from '../services/mqtt.service.js';
 
 export const actuatorController = {
   getRelayStates: (req: Request, res: Response) => {
+    const known = mqttService.relayStateReceived && mqttService.isControllerReady();
     return res.status(200).json({
       success: true,
-      data: mqttService.relayStateReceived ? mqttService.latestRelayState : null,
-      known: mqttService.relayStateReceived,
+      data: known ? mqttService.latestRelayState : null,
+      known,
     });
   },
 
@@ -31,6 +32,13 @@ export const actuatorController = {
       });
     }
 
+    if (!mqttService.isControllerReady()) {
+      return res.status(503).json({
+        success: false,
+        error: 'Controller feedback is offline or stale. Relay command was not sent.',
+      });
+    }
+
     const ok = ActuatorService.sendRelayCommand(channel, action, 'web');
 
     if (!ok) {
@@ -40,9 +48,9 @@ export const actuatorController = {
       });
     }
 
-    return res.status(200).json({
+    return res.status(202).json({
       success: true,
-      message: `Command r${channel}${action.toLowerCase()} sent to firmware.`,
+      message: `Command r${channel}${action.toLowerCase()} dispatched; awaiting device feedback.`,
       channel,
       action,
     });
@@ -58,20 +66,25 @@ export const actuatorController = {
       });
     }
 
+    if (!mqttService.isControllerReady()) {
+      return res.status(503).json({
+        success: false,
+        error: 'Controller feedback is offline or stale. Relay commands were not sent.',
+      });
+    }
+
     const ok = ActuatorService.sendAllRelayCommand(action, 'web');
 
     if (!ok) {
       return res.status(503).json({
         success: false,
-        error: 'Failed to dispatch command to MQTT broker.',
+        error: 'One or more relay commands failed to dispatch. Check each device feedback state.',
       });
     }
 
-    return res.status(200).json({
+    return res.status(202).json({
       success: true,
-      message: action === 'OFF'
-        ? 'Sent "auto" command — all relays returned to automatic control.'
-        : `Sent r1on..r4on commands to firmware.`,
+      message: `Sent r1${action.toLowerCase()}..r4${action.toLowerCase()} commands; awaiting device feedback.`,
       action,
     });
   },

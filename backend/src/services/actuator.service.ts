@@ -52,9 +52,7 @@ export class ActuatorService {
     const ok = mqttService.publish(cmdTopic, cmdPayload);
 
     if (ok) {
-      // Perbarui relay state seketika dan broadcast via WebSocket (0ms lag)
-      mqttService.updateRelayState(channel, action);
-
+      // Publish bukan bukti relay fisik berubah. Tunggu event/telemetri dari alat.
       sqliteRepo.insertRelayLog({
         channel,
         relay_name: relayName,
@@ -71,50 +69,30 @@ export class ActuatorService {
    * Mengirim perintah ke seluruh relay sekaligus.
    *
    * Firmware tidak punya perintah "all ON" / "all OFF" eksplisit.
-   * Untuk mematikan semua dan kembali ke otomatis, kirim "auto".
-   * Untuk ON/OFF individual, kirim per-channel.
+   * Kirim ON/OFF per kanal. "auto" BUKAN sinonim OFF: kendali otomatis
+   * dapat langsung menyalakan relay lagi.
    */
   public static sendAllRelayCommand(action: RelayAction, source: 'web' | 'mqtt_sync' = 'web'): boolean {
     const cmdTopic = getCmdTopic();
 
-    // Untuk OFF semua, cara firmware yang benar = kirim "auto" (kembali ke otomatis)
-    if (action === 'OFF') {
-      logger.info(`[ACTUATOR] Sending AUTO (all off + return to auto) -> Topic: ${cmdTopic}`);
-      const ok = mqttService.publish(cmdTopic, 'auto');
-      if (ok) {
-        for (let ch = 1; ch <= 4; ch++) {
-          mqttService.updateRelayState(ch as RelayChannel, 'OFF');
-          sqliteRepo.insertRelayLog({
-            channel: ch as RelayChannel,
-            relay_name: RELAY_NAMES[ch as RelayChannel],
-            action: 'OFF',
-            source,
-            timestamp: new Date().toISOString(),
-          });
-        }
-      }
-      return ok;
-    }
-
-    // Untuk ON semua, kirim per-channel
-    logger.info(`[ACTUATOR] Sending ALL Relay ON -> Topic: ${cmdTopic}`);
-    let anySuccess = false;
+    logger.info(`[ACTUATOR] Sending ALL Relay ${action} -> Topic: ${cmdTopic}`);
+    let allSuccess = true;
     for (let ch = 1; ch <= 4; ch++) {
-      const cmdPayload = `r${ch}on`;
+      const cmdPayload = `r${ch}${action.toLowerCase()}`;
       const ok = mqttService.publish(cmdTopic, cmdPayload);
       if (ok) {
-        anySuccess = true;
-        mqttService.updateRelayState(ch as RelayChannel, 'ON');
         sqliteRepo.insertRelayLog({
           channel: ch as RelayChannel,
           relay_name: RELAY_NAMES[ch as RelayChannel],
-          action: 'ON',
+          action,
           source,
           timestamp: new Date().toISOString(),
         });
+      } else {
+        allSuccess = false;
       }
     }
-    return anySuccess;
+    return allSuccess;
   }
 
   /**
