@@ -65,7 +65,11 @@ class MqttService {
     relay4: 'OFF',
   };
   public relayStateReceived: boolean = false;
-  private relayCommandTime: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  private relayFeedbackKnown: [boolean, boolean, boolean, boolean] = [false, false, false, false];
+  private lastMainTelemetryAt: number = 0;
+  private lastMainHeartbeatAt: number = 0;
+  private lastControllerReadyEmitted: boolean | null = null;
+  private readonly feedbackTimeoutMs = 150_000;
 
   public init() {
     const brokerUrl = `mqtt://${env.MQTT_HOST}:${env.MQTT_PORT}`;
@@ -108,8 +112,8 @@ class MqttService {
       });
     });
 
-    this.client.on('message', (topic, payload) => {
-      this.handleIncomingMessage(topic, payload.toString());
+    this.client.on('message', (topic, payload, packet) => {
+      this.handleIncomingMessage(topic, payload.toString(), packet.retain);
     });
 
     this.client.on('error', (err) => {
@@ -118,12 +122,33 @@ class MqttService {
 
     this.client.on('offline', () => {
       this.isConnected = false;
+      this.lastMainHeartbeatAt = 0;
+      this.lastMainTelemetryAt = 0;
+      if (this.latestDeviceStatus?.status === 'online') {
+        this.latestDeviceStatus = { ...this.latestDeviceStatus, status: 'offline' };
+        this.notifySubscribers('status', this.latestDeviceStatus);
+        this.notifySubscribers('device_lwt', { status: 'offline' });
+      }
       logger.warn('MQTT Client went offline. Reconnecting in 5s...');
     });
 
     this.client.on('reconnect', () => {
       logger.info('Reconnecting to MQTT broker...');
     });
+
+    const freshnessTimer = setInterval(() => {
+      if (this.latestDeviceStatus?.status === 'online' && !this.isDeviceOnline()) {
+        this.latestDeviceStatus = { ...this.latestDeviceStatus, status: 'offline' };
+        this.notifySubscribers('status', this.latestDeviceStatus);
+        this.notifySubscribers('device_lwt', { status: 'offline' });
+      }
+      const ready = this.isControllerReady();
+      if (ready !== this.lastControllerReadyEmitted) {
+        this.lastControllerReadyEmitted = ready;
+        this.notifySubscribers('controller_ready', ready);
+      }
+    }, 10_000);
+    freshnessTimer.unref();
   }
 
   // =====================================================================
@@ -160,7 +185,7 @@ class MqttService {
   //  Dispatcher pesan masuk — route berdasar suffix topik
   // =====================================================================
 
-  private handleIncomingMessage(topic: string, msgStr: string) {
+  private handleIncomingMessage(topic: string, msgStr: string, retained = false) {
     const raw = msgStr.trim();
     logger.debug(`[MQTT RX] Topic: ${topic} | Msg: ${raw}`);
 
@@ -170,35 +195,32 @@ class MqttService {
       //    Topic: {BASE}/telemetry
       //    Firmware publishTelemetry() L936-967
       // -------------------------------------------------------------------
-      if (topic.endsWith('/telemetry')) {
+      if (topic === `${env.MQTT_BASE_TOPIC}/telemetry`) {
         const data = safeJsonParse<TelemetryPayload>(raw);
         if (data) {
+          if (!Array.isArray(data.relay) || data.relay.length !== 4 ||
+              !data.relay.every(value => value === 0 || value === 1)) {
+            logger.warn('Ignoring telemetry with invalid relay feedback array.');
+            return;
+          }
           // Field yang firmware TIDAK kirim — kita tambahkan
           data.timestamp = new Date().toISOString();
           data.ip = this.latestDeviceStatus?.ip || '0.0.0.0';
           data.relay_known = true;
 
           this.latestTelemetry = data;
+          this.relayFeedbackKnown = [true, true, true, true];
           this.relayStateReceived = true;
-
-          // Sinkron relay state cache dari array (dengan proteksi race condition)
-          if (Array.isArray(data.relay) && data.relay.length === 4) {
-            const now = Date.now();
-            const r1 = (now - this.relayCommandTime[1] < 3500) ? (this.latestRelayState.relay1 === 'ON' ? 1 : 0) : Number(data.relay[0]);
-            const r2 = (now - this.relayCommandTime[2] < 3500) ? (this.latestRelayState.relay2 === 'ON' ? 1 : 0) : Number(data.relay[1]);
-            const r3 = (now - this.relayCommandTime[3] < 3500) ? (this.latestRelayState.relay3 === 'ON' ? 1 : 0) : Number(data.relay[2]);
-            const r4 = (now - this.relayCommandTime[4] < 3500) ? (this.latestRelayState.relay4 === 'ON' ? 1 : 0) : Number(data.relay[3]);
-
-            data.relay = [r1, r2, r3, r4];
-            this.latestRelayState = {
-              relay1: r1 ? 'ON' : 'OFF',
-              relay2: r2 ? 'ON' : 'OFF',
-              relay3: r3 ? 'ON' : 'OFF',
-              relay4: r4 ? 'ON' : 'OFF',
-            };
-          }
+          this.lastMainTelemetryAt = Date.now();
+          this.latestRelayState = {
+            relay1: data.relay[0] ? 'ON' : 'OFF',
+            relay2: data.relay[1] ? 'ON' : 'OFF',
+            relay3: data.relay[2] ? 'ON' : 'OFF',
+            relay4: data.relay[3] ? 'ON' : 'OFF',
+          };
 
           influxService.writeTelemetry(data);
+          this.notifySubscribers('relay_state', this.latestRelayState);
           this.notifySubscribers('telemetry', data);
         }
         return;
@@ -209,6 +231,11 @@ class MqttService {
       //    Topic: {legacy_prefix}/sensor1..6
       //    Dipertahankan untuk backward compatibility.
       // -------------------------------------------------------------------
+      if (/\/sensor[1-6]$/.test(topic) && this.lastMainTelemetryAt > 0 &&
+          Date.now() - this.lastMainTelemetryAt <= this.feedbackTimeoutMs) {
+        // Jangan campur pembacaan legacy ke snapshot controller utama yang masih hidup.
+        return;
+      }
       if (topic.endsWith('/sensor1') || topic.endsWith('/sensor2')) {
         const data = safeJsonParse<any>(raw);
         if (data) {
@@ -216,6 +243,7 @@ class MqttService {
           if (data.temp !== undefined) tele.air_t = Number(data.temp);
           if (data.hum !== undefined) tele.air_rh = Number(data.hum);
           tele.timestamp = new Date().toISOString();
+          tele.relay_known = false;
           influxService.writeTelemetry(tele);
           this.notifySubscribers('telemetry', tele);
         }
@@ -230,6 +258,7 @@ class MqttService {
           if (data.ec !== undefined) tele.ec = Number(data.ec);
           if (data.tds !== undefined) tele.tds = Number(data.tds);
           tele.timestamp = new Date().toISOString();
+          tele.relay_known = false;
           influxService.writeTelemetry(tele);
           this.notifySubscribers('telemetry', tele);
         }
@@ -243,6 +272,7 @@ class MqttService {
           if (data.suhu !== undefined) tele.water_t = Number(data.suhu);
           if (data.ph !== undefined) tele.ph = Number(data.ph);
           tele.timestamp = new Date().toISOString();
+          tele.relay_known = false;
           influxService.writeTelemetry(tele);
           this.notifySubscribers('telemetry', tele);
         }
@@ -263,6 +293,7 @@ class MqttService {
           if (data.jarak !== undefined) tele.dist_mm = Number(data.jarak);
           if (data.level !== undefined) tele.level_pct = Number(data.level);
           tele.timestamp = new Date().toISOString();
+          tele.relay_known = false;
           influxService.writeTelemetry(tele);
           this.notifySubscribers('telemetry', tele);
         }
@@ -277,32 +308,7 @@ class MqttService {
       // -------------------------------------------------------------------
       const relayChannelMatch = topic.match(/\/relay\/([1-4])\/state$/);
       if (relayChannelMatch) {
-        const ch = relayChannelMatch[1];
-        let state: 'ON' | 'OFF' = 'OFF';
-        const json = safeJsonParse<any>(raw);
-        if (json && typeof json === 'object') {
-          state = (json.state || json.action || 'OFF').toString().trim().toUpperCase() === 'ON' ? 'ON' : 'OFF';
-        } else {
-          state = raw.toUpperCase() === 'ON' ? 'ON' : 'OFF';
-        }
-
-        this.relayStateReceived = true;
-        if (ch === '1') this.latestRelayState.relay1 = state;
-        if (ch === '2') this.latestRelayState.relay2 = state;
-        if (ch === '3') this.latestRelayState.relay3 = state;
-        if (ch === '4') this.latestRelayState.relay4 = state;
-
-        if (this.latestTelemetry) {
-          this.latestTelemetry.relay = [
-            this.latestRelayState.relay1 === 'ON' ? 1 : 0,
-            this.latestRelayState.relay2 === 'ON' ? 1 : 0,
-            this.latestRelayState.relay3 === 'ON' ? 1 : 0,
-            this.latestRelayState.relay4 === 'ON' ? 1 : 0,
-          ];
-          this.latestTelemetry.relay_known = true;
-        }
-
-        this.notifySubscribers('relay_state', this.latestRelayState);
+        // State dari perangkat legacy tidak boleh menimpa empat relay controller utama.
         return;
       }
 
@@ -311,29 +317,7 @@ class MqttService {
       //    Topic: {legacy_prefix}/relay/state
       // -------------------------------------------------------------------
       if (topic.endsWith('/relay/state')) {
-        const data = safeJsonParse<any>(raw);
-        if (data && typeof data === 'object') {
-          this.relayStateReceived = true;
-          this.latestRelayState = {
-            relay1: data.relay1 || this.latestRelayState.relay1,
-            relay2: data.relay2 || this.latestRelayState.relay2,
-            relay3: data.relay3 || this.latestRelayState.relay3,
-            relay4: data.relay4 || this.latestRelayState.relay4,
-            rssi: data.rssi !== undefined ? Number(data.rssi) : this.latestRelayState.rssi,
-          };
-
-          if (this.latestTelemetry) {
-            this.latestTelemetry.relay = [
-              this.latestRelayState.relay1 === 'ON' ? 1 : 0,
-              this.latestRelayState.relay2 === 'ON' ? 1 : 0,
-              this.latestRelayState.relay3 === 'ON' ? 1 : 0,
-              this.latestRelayState.relay4 === 'ON' ? 1 : 0,
-            ];
-            this.latestTelemetry.relay_known = true;
-          }
-
-          this.notifySubscribers('relay_state', this.latestRelayState);
-        }
+        // Prefix legacy tetap disubscribe untuk sensor, bukan sumber feedback relay utama.
         return;
       }
 
@@ -349,12 +333,14 @@ class MqttService {
       //
       //    Plain text "offline"/"online" dari perangkat legacy juga di-handle.
       // -------------------------------------------------------------------
-      if (topic.endsWith('/status')) {
+      if (topic === `${env.MQTT_BASE_TOPIC}/status`) {
         const lower = raw.toLowerCase();
 
         // Plain text LWT (legacy)
         if (lower === 'offline' || lower === 'online') {
+          if (retained && lower === 'online') return;
           logger.info(`[MQTT] Controller LWT Status -> ${lower} (Topic: ${topic})`);
+          this.lastMainHeartbeatAt = lower === 'online' ? Date.now() : 0;
           if (this.latestDeviceStatus) {
             this.latestDeviceStatus.status = lower as 'online' | 'offline';
           } else {
@@ -377,11 +363,13 @@ class MqttService {
         // JSON heartbeat (firmware format)
         const data = safeJsonParse<DeviceStatusPayload>(raw);
         if (data && typeof data === 'object') {
+          if (retained && data.status === 'online') return;
           // Firmware tidak mengirim timestamp/ip — kita tambahkan
           if (!data.timestamp) {
             data.timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
           }
           this.latestDeviceStatus = data;
+          this.lastMainHeartbeatAt = data.status === 'online' ? Date.now() : 0;
           influxService.writeHeartbeat(data);
           this.notifySubscribers('status', data);
 
@@ -399,7 +387,7 @@ class MqttService {
       //    Firmware publishAlarm() L893-904:
       //    {"code":"C01a","state":"active","level":"critical","ts":12345}
       // -------------------------------------------------------------------
-      if (topic.endsWith('/alarm')) {
+      if (topic === `${env.MQTT_BASE_TOPIC}/alarm`) {
         const data = safeJsonParse<AlarmPayload>(raw);
         if (data) {
           const record = AlarmService.processAlarm(data);
@@ -417,7 +405,7 @@ class MqttService {
       //    {"kind":"manual_on","detail":"misting","ts":12345}
       //    {"kind":"guard_trip","detail":"exhaust_fan","ts":12345,"buffered":true}
       // -------------------------------------------------------------------
-      if (topic.endsWith('/event')) {
+      if (topic === `${env.MQTT_BASE_TOPIC}/event`) {
         const data = safeJsonParse<EventPayload>(raw);
         if (data) {
           sqliteRepo.insertSystemEvent({
@@ -435,16 +423,22 @@ class MqttService {
             lampu_grow: 4,
           };
           const ch = relayMap[data.detail];
-          if (ch) {
-            if (data.kind === 'manual_on' || data.kind === 'relay') {
+          // Event yang tertunda atau hanya berjenis "relay" tidak memuat keadaan akhir.
+          // Keduanya tidak boleh dipakai untuk menyimpulkan ON/OFF saat ini.
+          if (!data.buffered && ch) {
+            if (data.kind === 'relay' || data.kind === 'manual_expire') {
+              this.relayFeedbackKnown[ch - 1] = false;
+              this.relayStateReceived = this.relayFeedbackKnown.every(Boolean);
+            } else if (data.kind === 'manual_on' || data.kind === 'dwin_manual_on') {
               this.updateRelayState(ch, 'ON');
-            } else if (data.kind === 'manual_off' || data.kind === 'manual_denied' || data.kind === 'guard_trip') {
+            } else if (data.kind === 'manual_off' || data.kind === 'dwin_manual_off' ||
+                       data.kind === 'manual_denied' || data.kind === 'dwin_manual_denied' ||
+                       data.kind === 'guard_trip') {
               this.updateRelayState(ch, 'OFF');
             }
-          } else if (data.kind === 'manual_auto') {
-            for (let i = 1; i <= 4; i++) {
-              this.updateRelayState(i as 1 | 2 | 3 | 4, 'OFF');
-            }
+          } else if (!data.buffered && data.kind === 'manual_auto') {
+            this.relayFeedbackKnown = [false, false, false, false];
+            this.relayStateReceived = false;
           }
 
           this.notifySubscribers('event', data);
@@ -461,17 +455,25 @@ class MqttService {
   // =====================================================================
 
   public updateRelayState(channel: 1 | 2 | 3 | 4, action: 'ON' | 'OFF') {
-    this.relayStateReceived = true;
-    this.relayCommandTime[channel] = Date.now();
+    this.relayFeedbackKnown[channel - 1] = true;
+    this.relayStateReceived = this.relayFeedbackKnown.every(Boolean);
     const key = `relay${channel}` as keyof RelayStatePayload;
     if (key in this.latestRelayState) {
       (this.latestRelayState as any)[key] = action;
     }
-    if (this.latestTelemetry) {
-      this.latestTelemetry.relay[channel - 1] = action === 'ON' ? 1 : 0;
-      this.latestTelemetry.relay_known = true;
+    if (this.relayStateReceived) {
+      this.notifySubscribers('relay_state', this.latestRelayState);
     }
-    this.notifySubscribers('relay_state', this.latestRelayState);
+  }
+
+  public isDeviceOnline(): boolean {
+    return this.isConnected && this.latestDeviceStatus?.status === 'online' &&
+      this.lastMainHeartbeatAt > 0 && Date.now() - this.lastMainHeartbeatAt <= this.feedbackTimeoutMs;
+  }
+
+  public isControllerReady(): boolean {
+    return this.isDeviceOnline() && this.relayStateReceived &&
+      this.lastMainTelemetryAt > 0 && Date.now() - this.lastMainTelemetryAt <= this.feedbackTimeoutMs;
   }
 
   public subscribeEvents(cb: MessageCallback) {
@@ -500,6 +502,7 @@ class MqttService {
   public getStatus() {
     return {
       connected: this.isConnected,
+      controllerReady: this.isControllerReady(),
       broker: `${env.MQTT_HOST}:${env.MQTT_PORT}`,
       client_id: env.MQTT_CLIENT_ID,
     };

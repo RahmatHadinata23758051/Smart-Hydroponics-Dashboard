@@ -12,6 +12,8 @@ function getApiUrl(): string {
 
 const API = getApiUrl()
 const EMPTY_RELAYS: RelayState = [false, false, false, false]
+type RelayCommand = 'ON' | 'OFF'
+type PendingRelays = [RelayCommand | null, RelayCommand | null, RelayCommand | null, RelayCommand | null]
 
 export type HistoryRange = '1h' | '24h' | '30d'
 
@@ -122,6 +124,8 @@ export function useHydroData() {
   const [alarms, setAlarms] = useState<AlarmRecord[]>([])
   const [relays, setRelays] = useState<RelayState>(EMPTY_RELAYS)
   const [relayKnown, setRelayKnown] = useState(false)
+  const [pendingRelays, setPendingRelays] = useState<PendingRelays>([null, null, null, null])
+  const [controllerReady, setControllerReady] = useState(false)
   const [socketConnected, setSocketConnected] = useState(false)
   const [backendAvailable, setBackendAvailable] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -129,7 +133,53 @@ export function useHydroData() {
   const [historyRange, setHistoryRange] = useState<HistoryRange>('24h')
   const historyRangeRef = useRef<HistoryRange>('24h')
   const [notice, setNotice] = useState('')
-  const optimisticLockRef = useRef<number[]>([0, 0, 0, 0])
+  const confirmedRelaysRef = useRef<RelayState>(EMPTY_RELAYS)
+  const pendingRef = useRef<PendingRelays>([null, null, null, null])
+  const pendingTimersRef = useRef<Array<number | null>>([null, null, null, null])
+  const hasSocketFeedbackRef = useRef(false)
+  const hasSocketStatusRef = useRef(false)
+
+  const finishPending = useCallback((index: number, outcome: 'confirmed' | 'rejected' | 'timeout' | 'failed' | 'disconnected') => {
+    const action = pendingRef.current[index]
+    if (!action) return
+    pendingRef.current[index] = null
+    const timer = pendingTimersRef.current[index]
+    if (timer !== null) window.clearTimeout(timer)
+    pendingTimersRef.current[index] = null
+    setPendingRelays([...pendingRef.current] as PendingRelays)
+
+    const channel = index + 1
+    if (outcome === 'confirmed') setNotice(`Feedback perangkat menunjukkan Relay ${channel} ${action}.`)
+    if (outcome === 'rejected') setNotice(`Perangkat menolak perintah Relay ${channel}. Periksa pengaman alat.`)
+    if (outcome === 'timeout') setNotice(`Belum ada konfirmasi Relay ${channel}. Periksa kondisi fisik sebelum mencoba lagi.`)
+    if (outcome === 'failed') setNotice(`Perintah Relay ${channel} gagal dikirim. Tidak ada perubahan status yang diasumsikan.`)
+    if (outcome === 'disconnected') setNotice(`Koneksi terputus; perintah Relay ${channel} belum terverifikasi.`)
+  }, [])
+
+  const acceptRelayFeedback = useCallback((next: RelayState) => {
+    confirmedRelaysRef.current = next
+    setRelays(next)
+    setRelayKnown(true)
+    next.forEach((isOn, index) => {
+      const pending = pendingRef.current[index]
+      if (pending && (pending === 'ON') === isOn) finishPending(index, 'confirmed')
+    })
+  }, [finishPending])
+
+  const acceptRelayChannel = useCallback((index: number, isOn: boolean) => {
+    const next = [...confirmedRelaysRef.current] as RelayState
+    next[index] = isOn
+    confirmedRelaysRef.current = next
+    setRelays(next)
+    const pending = pendingRef.current[index]
+    if (pending && (pending === 'ON') === isOn) finishPending(index, 'confirmed')
+  }, [finishPending])
+
+  useEffect(() => () => {
+    pendingTimersRef.current.forEach(timer => {
+      if (timer !== null) window.clearTimeout(timer)
+    })
+  }, [])
 
   useEffect(() => {
     historyRangeRef.current = historyRange
@@ -138,17 +188,8 @@ export function useHydroData() {
   const ingest = useCallback((data: Telemetry) => {
     setTelemetry(data)
     if (data.relay_known === true && Array.isArray(data.relay) && data.relay.length === 4) {
-      setRelays(prev => {
-        const next = [...prev] as RelayState
-        const now = Date.now()
-        for (let i = 0; i < 4; i++) {
-          if (now >= (optimisticLockRef.current[i] || 0)) {
-            next[i] = Boolean(data.relay[i])
-          }
-        }
-        return next
-      })
-      setRelayKnown(true)
+      hasSocketFeedbackRef.current = true
+      acceptRelayFeedback(data.relay.map(Boolean) as RelayState)
     }
     setHistory(items => {
       const preset = HISTORY_QUERY[historyRangeRef.current]
@@ -172,7 +213,7 @@ export function useHydroData() {
 
       return [...visibleItems, point].slice(-720)
     })
-  }, [])
+  }, [acceptRelayFeedback])
 
   useEffect(() => {
     let active = true
@@ -221,13 +262,12 @@ export function useHydroData() {
 
       if (latestResult.status === 'fulfilled' && latestResult.value.data) setTelemetry(latestResult.value.data)
       if (healthResult.status === 'fulfilled') {
-        setStatus(healthResult.value.data.device)
+        if (!hasSocketStatusRef.current) setStatus(healthResult.value.data.device)
         setMqtt(healthResult.value.data.mqtt)
       }
-      if (relayResult.status === 'fulfilled' && relayResult.value.known && relayResult.value.data) {
+      if (!hasSocketFeedbackRef.current && relayResult.status === 'fulfilled' && relayResult.value.known && relayResult.value.data) {
         const value = relayResult.value.data
-        setRelays([1, 2, 3, 4].map(index => value[`relay${index}`] === 'ON') as RelayState)
-        setRelayKnown(true)
+        acceptRelayFeedback([1, 2, 3, 4].map(index => value[`relay${index}`] === 'ON') as RelayState)
       }
       if (alarmResult.status === 'fulfilled') setAlarms(alarmResult.value.data || [])
       setLoading(false)
@@ -237,27 +277,42 @@ export function useHydroData() {
       ? io(API, { path: '/socket.io', transports: ['websocket', 'polling'], timeout: 5000, reconnectionDelay: 2000 })
       : io({ path: '/socket.io', transports: ['websocket', 'polling'], timeout: 5000, reconnectionDelay: 2000 })
     socket.on('connect', () => { setSocketConnected(true); setBackendAvailable(true) })
-    socket.on('disconnect', () => setSocketConnected(false))
-    socket.on('connect_error', () => setSocketConnected(false))
+    socket.on('disconnect', () => {
+      setSocketConnected(false)
+      setControllerReady(false)
+      pendingRef.current.forEach((pending, index) => {
+        if (pending) finishPending(index, 'disconnected')
+      })
+    })
+    socket.on('connect_error', () => { setSocketConnected(false); setControllerReady(false) })
     socket.on('telemetry:live', ingest)
-    socket.on('status:live', (value: DeviceStatus) => setStatus(value))
-    socket.on('device:lwt', (value: string) => {
-      if (value === 'offline') setStatus(previous => previous ? { ...previous, status: 'offline' } : null)
+    socket.on('status:live', (value: DeviceStatus) => {
+      hasSocketStatusRef.current = true
+      setStatus(value)
+      if (value.status === 'offline') {
+        setControllerReady(false)
+        pendingRef.current.forEach((pending, index) => {
+          if (pending) finishPending(index, 'disconnected')
+        })
+      }
+    })
+    socket.on('controller:ready', (ready: boolean) => setControllerReady(ready))
+    socket.on('device:lwt', (value: { status: 'online' | 'offline' }) => {
+      if (value.status === 'offline') {
+        hasSocketStatusRef.current = true
+        setStatus(previous => previous ? { ...previous, status: 'offline' } : null)
+        setControllerReady(false)
+        pendingRef.current.forEach((pending, index) => {
+          if (pending) finishPending(index, 'disconnected')
+        })
+      }
     })
     socket.on('relay:state', (value: Record<string, string>) => {
-      setRelays(prev => {
-        const next = [...prev] as RelayState
-        const now = Date.now()
-        for (let i = 0; i < 4; i++) {
-          if (now >= (optimisticLockRef.current[i] || 0)) {
-            next[i] = value[`relay${i + 1}`] === 'ON'
-          }
-        }
-        return next
-      })
-      setRelayKnown(true)
+      hasSocketFeedbackRef.current = true
+      acceptRelayFeedback([1, 2, 3, 4].map(index => value[`relay${index}`] === 'ON') as RelayState)
     })
-    socket.on('event:new', (event: { kind: string; detail: string }) => {
+    socket.on('event:new', (event: { kind: string; detail: string; buffered?: boolean }) => {
+      if (event.buffered) return
       const relayNameMap: Record<string, number> = {
         pompa_nutrisi: 0,
         misting: 1,
@@ -266,28 +321,19 @@ export function useHydroData() {
       }
       const chIndex = relayNameMap[event.detail]
       if (chIndex !== undefined) {
-        if (event.kind === 'manual_on' || event.kind === 'relay') {
-          optimisticLockRef.current[chIndex] = 0
-          setRelays(prev => {
-            const n = [...prev] as RelayState
-            n[chIndex] = true
-            return n
-          })
-        } else if (event.kind === 'manual_off' || event.kind === 'guard_trip') {
-          optimisticLockRef.current[chIndex] = 0
-          setRelays(prev => {
-            const n = [...prev] as RelayState
-            n[chIndex] = false
-            return n
-          })
-        } else if (event.kind === 'manual_denied') {
-          optimisticLockRef.current[chIndex] = 0
-          setRelays(prev => {
-            const n = [...prev] as RelayState
-            n[chIndex] = false
-            return n
-          })
-          setNotice(`Perangkat menolak aktivasi ${event.detail} (Safety Lock aktif).`)
+        if (event.kind === 'manual_on' || event.kind === 'dwin_manual_on') {
+          acceptRelayChannel(chIndex, true)
+        } else if (event.kind === 'manual_off' || event.kind === 'dwin_manual_off' ||
+                   event.kind === 'guard_trip' || event.kind === 'manual_denied' ||
+                   event.kind === 'dwin_manual_denied') {
+          const rejected = event.kind === 'manual_denied' || event.kind === 'dwin_manual_denied' ||
+            event.kind === 'guard_trip'
+          if (rejected) finishPending(chIndex, 'rejected')
+          acceptRelayChannel(chIndex, false)
+          if (event.kind === 'guard_trip') setNotice(`Pengaman mematikan ${event.detail}. Periksa alat sebelum menyalakan kembali.`)
+          if (event.kind === 'manual_denied' || event.kind === 'dwin_manual_denied') {
+            setNotice(`Perangkat menolak aktivasi ${event.detail} (Safety Lock aktif).`)
+          }
         }
       }
     })
@@ -296,7 +342,7 @@ export function useHydroData() {
     })
 
     return () => { active = false; socket.disconnect() }
-  }, [ingest])
+  }, [acceptRelayChannel, acceptRelayFeedback, finishPending, ingest])
 
   // Verify existing token on initial load
   useEffect(() => {
@@ -387,17 +433,15 @@ export function useHydroData() {
   }, [token])
 
   const toggleRelay = useCallback(async (index: number) => {
-    const action = relays[index] ? 'OFF' : 'ON'
-
-    // Kunci channel ini selama 3.5 detik dari penimpaan paket telemetri lama
-    optimisticLockRef.current[index] = Date.now() + 3500
-
-    setRelays(prev => {
-      const next = [...prev] as RelayState
-      next[index] = action === 'ON'
-      return next
-    })
-    setRelayKnown(true)
+    if (index < 0 || index > 3 || pendingRef.current[index]) return
+    if (!controllerReady || !socketConnected || !backendAvailable || status?.status !== 'online' || !relayKnown) {
+      setNotice('Kontrol terkunci karena feedback langsung dari perangkat belum tersedia.')
+      return
+    }
+    const action: RelayCommand = confirmedRelaysRef.current[index] ? 'OFF' : 'ON'
+    pendingRef.current[index] = action
+    setPendingRelays([...pendingRef.current] as PendingRelays)
+    pendingTimersRef.current[index] = window.setTimeout(() => finishPending(index, 'timeout'), 12_000)
 
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -409,17 +453,11 @@ export function useHydroData() {
         body: JSON.stringify({ action }),
       })
       if (!response.ok) throw new Error()
-      setNotice(`Perintah ${action} berhasil dikirim ke Relay ${index + 1}.`)
+      if (pendingRef.current[index]) setNotice(`Perintah ${action} dikirim; menunggu feedback Relay ${index + 1}.`)
     } catch {
-      optimisticLockRef.current[index] = 0
-      setRelays(prev => {
-        const next = [...prev] as RelayState
-        next[index] = action === 'OFF'
-        return next
-      })
-      setNotice('Perintah gagal dikirim. Backend atau broker MQTT tidak tersedia.')
+      finishPending(index, 'failed')
     }
-  }, [relays, token])
+  }, [backendAvailable, controllerReady, finishPending, relayKnown, socketConnected, status?.status, token])
 
   useEffect(() => {
     if (!notice) return
@@ -429,7 +467,7 @@ export function useHydroData() {
 
   return {
     user, token, authLoading, isAuthenticated, login, logout,
-    telemetry, status, mqtt, history, alarms, relays, relayKnown, socketConnected,
+    telemetry, status, mqtt, history, alarms, relays, relayKnown, pendingRelays, controllerReady, socketConnected,
     backendAvailable, loading, historyLoading, historyRange, setHistoryRange,
     toggleRelay, notice,
   }

@@ -42,6 +42,7 @@ export interface AlarmRecord {
 
 export interface MqttStatus {
   connected: boolean
+  controllerReady?: boolean
   broker: string
   client_id: string
 }
