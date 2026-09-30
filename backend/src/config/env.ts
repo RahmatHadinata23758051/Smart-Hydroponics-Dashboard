@@ -34,8 +34,20 @@ const envSchema = z.object({
 
   // Authentication Settings
   ADMIN_USERNAME: z.string().default('admin'),
-  ADMIN_PASSWORD: z.string().default('REDACTED_ADMIN_PASSWORD'),
-  AUTH_SECRET: z.string().default('REDACTED_AUTH_SECRET'),
+  ADMIN_PASSWORD: z.string().default(''),
+  AUTH_SECRET: z.string().default(''),
+}).superRefine((values, ctx) => {
+  if (values.NODE_ENV !== 'production') return;
+
+  for (const key of ['ADMIN_PASSWORD', 'AUTH_SECRET', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'INFLUX_TOKEN'] as const) {
+    if (!values[key].trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} must be set in production`,
+      });
+    }
+  }
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -35,7 +35,7 @@ describe('Authentication & Authorization Suite', () => {
     it('should authenticate successfully with correct admin credentials', async () => {
       const res = await request(app)
         .post('/api/v1/auth/login')
-        .send({ username: 'admin', password: 'REDACTED_ADMIN_PASSWORD' });
+        .send({ username: 'admin', password: 'test-only-password' });
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.token).toBeDefined();
