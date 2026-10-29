@@ -213,12 +213,13 @@ function ViewportVideo({ src, poster, className, onError }: {
   )
 }
 
-function SensorChart({ definition, data, loading, range, liveValue }: {
+function SensorChart({ definition, data, loading, range, liveValue, sampleCount }: {
   definition: SensorDefinition
   data: ChartPoint[]
   loading: boolean
   range: HistoryRange
   liveValue?: number | null
+  sampleCount?: number
 }) {
   const available = data.filter(point => point[definition.key] !== null && point[definition.key] !== undefined)
   const current = (available.at(-1)?.[definition.key] ?? liveValue) as number | undefined
@@ -281,7 +282,7 @@ function SensorChart({ definition, data, loading, range, liveValue }: {
           </div>
         )}
       </div>
-      <footer><span>{definition.ideal}</span><b>{available.length} sampel</b></footer>
+      <footer><span>{definition.ideal}</span><b>{loading ? 'Menghitung…' : sampleCount === undefined ? 'Jumlah tidak tersedia' : `${sampleCount.toLocaleString('id-ID')} sampel`}</b></footer>
     </article>
   )
 }
@@ -335,7 +336,7 @@ function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
   const {
     user, logout,
     telemetry, status, mqtt, history, alarms, relays, relayKnown, pendingRelays, controllerReady, socketConnected,
-    backendAvailable, loading, historyLoading, historyRange, setHistoryRange,
+    backendAvailable, loading, historyLoading, historyRange, historySampleCounts, setHistoryRange,
     toggleRelay, notice,
   } = data
 
@@ -540,7 +541,7 @@ function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
                 ))}
               </div>
               <span className={`sample-count ${historyLoading ? 'loading' : ''}`}>
-                {historyLoading ? 'Mengambil histori' : `${history.length} telemetry tersimpan`}
+                {historyLoading ? 'Mengambil histori' : `${history.length} titik agregasi`}
               </span>
             </div>
             <div className="charts-grid">
@@ -552,6 +553,7 @@ function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
                   loading={historyLoading}
                   range={historyRange}
                   liveValue={telemetry?.[definition.key]}
+                  sampleCount={historySampleCounts?.[definition.key]}
                 />
               ))}
             </div>
@@ -627,6 +629,38 @@ function DashboardView({ data }: { data: ReturnType<typeof useHydroData> }) {
           </div>
         </div>
       </main>
+
+      <section className="project-team" aria-labelledby="project-team-title">
+        <div className="project-team-heading">
+          <h2 id="project-team-title">Tim proyek</h2>
+        </div>
+        <ul className="project-team-list">
+          <li>
+            <article className="project-team-card">
+              <div className="project-team-photo">
+                <img src="/team/pak-imam.png" alt="Ir. Imam Asrowardi" loading="lazy" />
+              </div>
+              <h3>Ir. Imam Asrowardi, S.Kom., M.Kom., M.Pd., IPM., ASEAN Eng.</h3>
+            </article>
+          </li>
+          <li>
+            <article className="project-team-card">
+              <div className="project-team-photo">
+                <img src="/team/pak-septa.png" alt="Dr. Ir. Septafiansyah Dwi Putra" loading="lazy" />
+              </div>
+              <h3>Dr. Ir. Septafiansyah Dwi Putra, S.T., M.T., IPM., ASEAN Eng.</h3>
+            </article>
+          </li>
+          <li>
+            <article className="project-team-card">
+              <div className="project-team-photo">
+                <img src="/team/pak-eko.png" alt="Ir. Eko Subyantoro" loading="lazy" />
+              </div>
+              <h3>Ir. Eko Subyantoro, S.Kom., M.Kom.</h3>
+            </article>
+          </li>
+        </ul>
+      </section>
 
       <footer className="site-footer">
         <div className="footer-brand">

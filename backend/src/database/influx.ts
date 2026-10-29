@@ -101,6 +101,28 @@ function querySqliteTelemetry(range: string, interval: string) {
     }));
 }
 
+function querySqliteTelemetrySampleCounts(range: string): Record<TelemetryField, number> {
+  const rangeMs = durationToMs(range, 24 * 3_600_000);
+  const now = new Date();
+  const from = new Date(now.getTime() - rangeMs);
+  const rows = sqliteRepo.getTelemetryRange(
+    from.toISOString(),
+    now.toISOString(),
+  ) as SqliteTelemetryRow[];
+  const counts = Object.fromEntries(TELEMETRY_FIELDS.map(field => [field, 0])) as Record<TelemetryField, number>;
+
+  for (const row of rows) {
+    for (const field of TELEMETRY_FIELDS) {
+      const value = row[field];
+      if (value !== null && value !== undefined && Number.isFinite(Number(value))) {
+        counts[field] += 1;
+      }
+    }
+  }
+
+  return counts;
+}
+
 class InfluxService {
   private client: InfluxDB | null = null;
   private writeApi: WriteApi | null = null;
@@ -203,11 +225,7 @@ class InfluxService {
     }
   }
 
-  public async queryTelemetry(range: string = '-24h', interval: string = '5m') {
-    if (!this.isEnabled || !this.queryApi) {
-      return querySqliteTelemetry(range, interval);
-    }
-
+  private async queryInfluxTelemetryRows(range: string, interval: string) {
     const fluxQuery = `
       from(bucket: "${env.INFLUX_BUCKET}")
         |> range(start: ${range})
@@ -217,49 +235,108 @@ class InfluxService {
         |> sort(columns: ["_time"])
     `;
 
-    try {
-      const rows: any[] = [];
-      await new Promise<void>((resolve, reject) => {
-        this.queryApi!.queryRows(fluxQuery, {
-          next(row, tableMetadata) {
-            const obj = tableMetadata.toObject(row);
-            rows.push({
-              timestamp: obj._time,
-              air_t: obj.air_t ?? null,
-              air_rh: obj.air_rh ?? null,
-              lux: obj.lux ?? null,
-              ec: obj.ec ?? null,
-              tds: obj.tds ?? null,
-              ph: obj.ph ?? null,
-              water_t: obj.water_t ?? null,
-              dist_mm: obj.dist_mm ?? null,
-              level_pct: obj.level_pct ?? null,
-              relay1: obj.relay_pump ? 1 : 0,
-              relay2: obj.relay_mist ? 1 : 0,
-              relay3: obj.relay_fan ? 1 : 0,
-              relay4: obj.relay_light ? 1 : 0,
-            });
-          },
-          error(error) {
-            reject(error);
-          },
-          complete() {
-            resolve();
-          },
-        });
+    const rows: any[] = [];
+    await new Promise<void>((resolve, reject) => {
+      this.queryApi!.queryRows(fluxQuery, {
+        next(row, tableMetadata) {
+          const obj = tableMetadata.toObject(row);
+          rows.push({
+            timestamp: obj._time,
+            air_t: obj.air_t ?? null,
+            air_rh: obj.air_rh ?? null,
+            lux: obj.lux ?? null,
+            ec: obj.ec ?? null,
+            tds: obj.tds ?? null,
+            ph: obj.ph ?? null,
+            water_t: obj.water_t ?? null,
+            dist_mm: obj.dist_mm ?? null,
+            level_pct: obj.level_pct ?? null,
+            relay1: obj.relay_pump ? 1 : 0,
+            relay2: obj.relay_mist ? 1 : 0,
+            relay3: obj.relay_fan ? 1 : 0,
+            relay4: obj.relay_light ? 1 : 0,
+          });
+        },
+        error(error) {
+          reject(error);
+        },
+        complete() {
+          resolve();
+        },
       });
+    });
+    return rows;
+  }
 
-      // Jika InfluxDB berhasil mengembalikan data, langsung gunakan data InfluxDB
-      if (rows.length > 0) {
-        return rows;
-      }
+  private async queryInfluxTelemetrySampleCounts(range: string): Promise<Record<TelemetryField, number>> {
+    const fields = TELEMETRY_FIELDS.map(field => `"${field}"`).join(', ');
+    const fluxQuery = `
+      from(bucket: "${env.INFLUX_BUCKET}")
+        |> range(start: ${range})
+        |> filter(fn: (r) => r["_measurement"] == "hydro_telemetry")
+        |> filter(fn: (r) => contains(value: r["_field"], set: [${fields}]))
+        |> group(columns: ["_field"])
+        |> count()
+    `;
+    const counts = Object.fromEntries(TELEMETRY_FIELDS.map(field => [field, 0])) as Record<TelemetryField, number>;
 
-      // Fallback ke SQLite jika InfluxDB baru saja di-deploy dan belum punya histori lama
+    await new Promise<void>((resolve, reject) => {
+      this.queryApi!.queryRows(fluxQuery, {
+        next(row, tableMetadata) {
+          const obj = tableMetadata.toObject(row);
+          if (TELEMETRY_FIELDS.includes(obj._field as TelemetryField)) {
+            counts[obj._field as TelemetryField] = Number(obj._value) || 0;
+          }
+        },
+        error(error) {
+          reject(error);
+        },
+        complete() {
+          resolve();
+        },
+      });
+    });
+
+    return counts;
+  }
+
+  public async queryTelemetry(range: string = '-24h', interval: string = '5m') {
+    if (!this.isEnabled || !this.queryApi) {
       return querySqliteTelemetry(range, interval);
+    }
+
+    try {
+      const rows = await this.queryInfluxTelemetryRows(range, interval);
+      return rows.length > 0 ? rows : querySqliteTelemetry(range, interval);
     } catch (err) {
       logger.error('Influx query error, falling back to SQLite:', err);
       return querySqliteTelemetry(range, interval);
     }
+  }
+
+  public async queryTelemetryWithSampleCounts(range: string, interval: string) {
+    if (!this.isEnabled || !this.queryApi) {
+      return {
+        data: querySqliteTelemetry(range, interval),
+        sampleCounts: querySqliteTelemetrySampleCounts(range),
+      };
+    }
+
+    try {
+      const [data, sampleCounts] = await Promise.all([
+        this.queryInfluxTelemetryRows(range, interval),
+        this.queryInfluxTelemetrySampleCounts(range),
+      ]);
+
+      if (data.length > 0) return { data, sampleCounts };
+    } catch (err) {
+      logger.error('Influx history/count query error, falling back to SQLite:', err);
+    }
+
+    return {
+      data: querySqliteTelemetry(range, interval),
+      sampleCounts: querySqliteTelemetrySampleCounts(range),
+    };
   }
 }
 

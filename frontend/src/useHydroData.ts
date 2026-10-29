@@ -38,6 +38,9 @@ type HistoryRow = Partial<Telemetry> & {
   relay4?: number
 }
 
+type SensorField = 'air_t' | 'air_rh' | 'lux' | 'ec' | 'tds' | 'ph' | 'water_t' | 'dist_mm' | 'level_pct'
+type HistorySampleCounts = Partial<Record<SensorField, number>>
+
 function parseDate(input?: string): Date {
   if (!input) return new Date(NaN)
   if (input.includes('T') || input.endsWith('Z')) return new Date(input)
@@ -121,6 +124,7 @@ export function useHydroData() {
   const [status, setStatus] = useState<DeviceStatus | null>(null)
   const [mqtt, setMqtt] = useState<MqttStatus | null>(null)
   const [history, setHistory] = useState<ChartPoint[]>([])
+  const [historySampleCounts, setHistorySampleCounts] = useState<HistorySampleCounts | null>(null)
   const [alarms, setAlarms] = useState<AlarmRecord[]>([])
   const [relays, setRelays] = useState<RelayState>(EMPTY_RELAYS)
   const [relayKnown, setRelayKnown] = useState(false)
@@ -221,20 +225,23 @@ export function useHydroData() {
     const query = HISTORY_QUERY[historyRange]
     setHistoryLoading(true)
     setHistory([])
+    setHistorySampleCounts(null)
 
-    getJson<{ data: HistoryRow[] }>(
+    getJson<{ data: HistoryRow[]; meta?: { sampleCounts?: HistorySampleCounts } }>(
       `/api/v1/telemetry/history?range=${query.range}&interval=${query.interval}`,
       controller.signal,
     )
       .then(result => {
         if (!active) return
         setHistory(normalizeHistory(result.data || []))
+        setHistorySampleCounts(result.meta?.sampleCounts ?? null)
         setBackendAvailable(true)
       })
       .catch(error => {
         if (!active) return
         if (error instanceof Error && error.name === 'AbortError') return
         setHistory([])
+        setHistorySampleCounts(null)
       })
       .finally(() => {
         if (active) setHistoryLoading(false)
@@ -467,7 +474,7 @@ export function useHydroData() {
 
   return {
     user, token, authLoading, isAuthenticated, login, logout,
-    telemetry, status, mqtt, history, alarms, relays, relayKnown, pendingRelays, controllerReady, socketConnected,
+    telemetry, status, mqtt, history, historySampleCounts, alarms, relays, relayKnown, pendingRelays, controllerReady, socketConnected,
     backendAvailable, loading, historyLoading, historyRange, setHistoryRange,
     toggleRelay, notice,
   }

@@ -44,8 +44,8 @@ export const telemetryController = {
         });
       }
 
-      // Query dari InfluxDB atau SQLite
-      const data = await influxService.queryTelemetry(range, interval);
+      // Grafik memakai agregasi interval, jumlah sampel dihitung dari pembacaan mentah.
+      const { data, sampleCounts } = await influxService.queryTelemetryWithSampleCounts(range, interval);
 
       return res.status(200).json({
         success: true,
@@ -54,6 +54,7 @@ export const telemetryController = {
           range,
           interval,
           count: Array.isArray(data) ? data.length : 0,
+          sampleCounts,
         },
       });
     } catch (err: any) {
